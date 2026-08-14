@@ -1,0 +1,442 @@
+#!/bin/bash
+# vibecaf — keep this Mac fully awake, and online, with the lid CLOSED.
+#
+# Why this exists: `caffeinate` alone does not survive closing the lid. Its
+# assertions block *idle* sleep only; clamshell (lid-close) sleep is a separate
+# path in the power manager and ignores them. The setting that actually blocks
+# it is `pmset disablesleep 1`. This script pairs the two, and runs a network
+# watchdog that re-joins known Wi-Fi if the link drops while you're not looking.
+#
+# Usage: vibecaf [on|off|toggle|status|netlog]
+
+set -u
+
+PMSET=/usr/bin/pmset
+CAFFEINATE=/usr/bin/caffeinate
+NETWORKSETUP=/usr/sbin/networksetup
+OSASCRIPT=/usr/bin/osascript
+SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+
+PIDFILE="/tmp/vibecaf.$(id -u).pid"
+NETPIDFILE="/tmp/vibecaf-net.$(id -u).pid"
+GUARDPIDFILE="/tmp/vibecaf-guard.$(id -u).pid"
+STARTFILE="/tmp/vibecaf-started.$(id -u)"
+# The watchdog's latest verdict, so `status` can report the network without
+# running its own probe. See net_state / cheap_net.
+NETSTATEFILE="/tmp/vibecaf-net-state.$(id -u)"
+NETLOG="$HOME/Library/Logs/vibecaf-net.log"
+
+# -i idle system sleep, -m disk idle sleep, -s system sleep while on AC.
+#
+# Deliberately NOT -d and NOT -u. Both keep the display awake, and a display
+# that never idles is a screen lock that never arms — a lid-shut Mac in a bag
+# stays unlocked. There is nothing to see on a clamshell machine anyway, and the
+# panel backlight is the single largest draw on this laptop, so dropping them
+# costs nothing and saves both the battery and the exposure.
+CAF_FLAGS=(-i -m -s)
+
+# Guard tuning. Awake mode stops the Mac sleeping at all, so left alone on
+# battery it runs to empty — and a toggle you forgot is the normal way that
+# happens. The guard turns awake mode off by itself in both cases.
+# Overridable by environment so the guard can be exercised without waiting six
+# hours for it — see the test note at the bottom of this file.
+BATTERY_FLOOR=${VIBECAF_BATTERY_FLOOR:-20}      # % — below this, on battery, awake mode turns itself off
+DEADMAN_SECONDS=${VIBECAF_DEADMAN_SECONDS:-21600} # 6h — hard ceiling on one session, whatever the power
+GUARD_EVERY=${VIBECAF_GUARD_EVERY:-60}          # how often the guard checks
+
+# Watchdog tuning
+CHECK_EVERY=20        # seconds between probes when healthy
+FAILS_BEFORE_CYCLE=2  # consecutive failures before we touch the radio
+BACKOFF_MAX=180       # cap between recovery attempts
+ASSOC_TIMEOUT=60      # how long to let auto-join finish after a bounce
+MAX_BOUNCES=3         # consecutive failed bounces before we stop touching the radio
+PASSIVE_EVERY=60      # probe interval once we've given up on cycling
+PASSIVE_RETRY=900     # how long to stay passive before trying the radio again
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+clamshell_blocked() { "$PMSET" -g | grep -q 'SleepDisabled.*1'; }
+
+wifi_device() {
+  "$NETWORKSETUP" -listallhardwareports \
+    | awk '/Hardware Port: Wi-Fi/{getline; print $2; exit}'
+}
+
+pid_alive() {  # pid_alive <pidfile>
+  [ -f "$1" ] || return 1
+  local pid; pid=$(cat "$1" 2>/dev/null)
+  [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null && echo "$pid"
+}
+
+our_caffeinate_pid() { pid_alive "$PIDFILE"; }
+netwatch_pid()       { pid_alive "$NETPIDFILE"; }
+guard_pid()          { pid_alive "$GUARDPIDFILE"; }
+
+# Escalate ONLY the pmset call. The optional installer rule permits exactly the
+# two disablesleep commands. The osascript branch is the fallback when that
+# rule is not installed.
+admin_pmset() {
+  if /usr/bin/sudo -n "$PMSET" -a disablesleep "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  # The guard runs unattended behind a closed lid. An admin dialog there waits
+  # forever for someone who isn't there, so it must fail instead of prompting.
+  [ "${VIBECAF_NONINTERACTIVE:-0}" = "1" ] && return 1
+  "$OSASCRIPT" -e "do shell script \"$PMSET -a disablesleep $1\" with administrator privileges" >/dev/null 2>&1
+}
+
+# `pmset` is a fork+exec, and status runs on every menu open. Read the battery
+# blob once with batt_blob and pass it to both readers rather than shelling out
+# per field — this used to cost four pmset execs per status call.
+batt_blob()    { "$PMSET" -g batt; }
+power_source() { case "$1" in *"AC Power"*) echo AC ;; *) echo Battery ;; esac; }
+battery_pct()  { printf '%s' "$1" | grep -o '[0-9]\+%' | head -1; }
+battery_num()  { battery_pct "$1" | tr -d '%'; }
+
+# ── network watchdog ─────────────────────────────────────────────────────────
+
+netlog() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$NETLOG"; }
+
+# 0 = fully online, 1 = link up but no internet (captive portal / LAN only),
+# 2 = no usable link.
+net_state() {
+  if curl -s --max-time 6 http://captive.apple.com/hotspot-detect.html 2>/dev/null \
+     | grep -q Success; then
+    return 0
+  fi
+  local gw
+  gw=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')
+  if [ -n "${gw:-}" ] && ping -c1 -W 1500 "$gw" >/dev/null 2>&1; then
+    return 1
+  fi
+  return 2
+}
+
+net_words() {  # net_words <net_state return code>
+  case "$1" in
+    0) echo "online" ;;
+    1) echo "link up, no internet" ;;
+    *) echo "DISCONNECTED" ;;
+  esac
+}
+
+# The watchdog already probes every CHECK_EVERY seconds, so anyone else asking
+# "are we online?" can read its answer instead of running a second probe. That
+# matters because net_state costs 8.5s when the network is down (6s curl
+# timeout + 2.5s ping), and the menu bar used to pay it on a 20s timer.
+publish_net() { printf '%s %s\n' "$(date +%s)" "$1" > "$NETSTATEFILE"; }
+
+cheap_net() {
+  local ts words now
+  [ -f "$NETSTATEFILE" ] || { echo "unknown"; return; }
+  read -r ts words < "$NETSTATEFILE" 2>/dev/null || { echo "unknown"; return; }
+  now=$(date +%s)
+  # A verdict nobody has refreshed in three probe intervals is not evidence.
+  if [ -z "${ts:-}" ] || [ $(( now - ts )) -gt $(( CHECK_EVERY * 3 )) ]; then
+    echo "unknown"; return
+  fi
+  echo "$words"
+}
+
+# Bouncing the radio makes macOS re-run auto-join against every known network,
+# using the credentials already in the keychain. That is the whole trick — there
+# is no supported CLI to "reconnect to the last network" on macOS 14.4+, and the
+# old `airport` utility was removed.
+#
+# Returns 0 as soon as we're online again. It polls instead of sleeping a fixed
+# amount because auto-join + DHCP regularly takes 20-40s (an iPhone hotspot has
+# to wake its own radio first), and the first version's flat 12s wait declared
+# failure while the association was still in progress — then bounced again and
+# destroyed it. Cutting the radio is only a fix if you then leave it alone.
+wifi_bounce() {
+  local dev="$1" waited=0
+  netlog "recovery: power-cycling $dev"
+  "$NETWORKSETUP" -setairportpower "$dev" off >/dev/null 2>&1
+  sleep 3
+  "$NETWORKSETUP" -setairportpower "$dev" on >/dev/null 2>&1
+  while [ "$waited" -lt "$ASSOC_TIMEOUT" ]; do
+    sleep 5; waited=$((waited + 5))
+    if net_state; then
+      netlog "associated after ${waited}s"
+      return 0
+    fi
+  done
+  netlog "no internet ${ASSOC_TIMEOUT}s after cycling (ip: $(ipconfig getifaddr "$dev" 2>/dev/null || echo none))"
+  return 1
+}
+
+netwatch_loop() {
+  local dev fails=0 backoff=$CHECK_EVERY recoveries=0 bounces=0 passive_since=0 now
+  dev=$(wifi_device)
+  if [ -z "${dev:-}" ]; then netlog "no Wi-Fi interface found; watchdog exiting"; return; fi
+  netlog "watchdog started on $dev"
+
+  # A radio that got switched off is the cheapest possible failure to fix.
+  if [ "$("$NETWORKSETUP" -getairportpower "$dev" | awk '{print $NF}')" = "Off" ]; then
+    netlog "Wi-Fi was off; turning it on"
+    "$NETWORKSETUP" -setairportpower "$dev" on >/dev/null 2>&1
+    sleep 10
+  fi
+
+  while :; do
+    net_state; local st=$?
+    publish_net "$(net_words "$st")"
+    case $st in
+      0)
+        if [ "$fails" -gt 0 ]; then netlog "back online after $fails failed probe(s)"; fi
+        fails=0; backoff=$CHECK_EVERY; bounces=0; passive_since=0
+        sleep "$CHECK_EVERY"
+        ;;
+      1)
+        # Link is fine, the internet isn't. Bouncing the radio cannot fix a
+        # captive portal or an upstream outage, so don't thrash — just note it.
+        if [ "$fails" -eq 0 ]; then netlog "link up but no internet (captive portal or upstream down) — not cycling"; fi
+        fails=$((fails + 1))
+        sleep "$CHECK_EVERY"
+        ;;
+      2)
+        fails=$((fails + 1))
+        # Don't log every probe while passive — that's one line a minute for as
+        # long as the network is gone, which buries the lines that matter.
+        [ "$passive_since" -eq 0 ] && netlog "probe failed ($fails)"
+
+        # Passive mode: MAX_BOUNCES in a row didn't help, so the problem isn't
+        # the radio — the network is gone (hotspot off, out of range, router
+        # down). Leave the radio ON and stay out of the way; macOS re-runs
+        # auto-join on its own, and it can only do that if we stop cutting
+        # power to the card. Try again much later in case we've moved.
+        if [ "$passive_since" -ne 0 ]; then
+          now=$(date +%s)
+          if [ $(( now - passive_since )) -lt "$PASSIVE_RETRY" ]; then
+            sleep "$PASSIVE_EVERY"; continue
+          fi
+          netlog "passive window over; trying the radio again"
+          passive_since=0; bounces=0
+        fi
+
+        if [ "$fails" -ge "$FAILS_BEFORE_CYCLE" ]; then
+          recoveries=$((recoveries + 1))
+          if wifi_bounce "$dev"; then
+            netlog "reconnected (recovery #$recoveries)"
+            fails=0; backoff=$CHECK_EVERY; bounces=0
+          else
+            bounces=$((bounces + 1))
+            if [ "$bounces" -ge "$MAX_BOUNCES" ]; then
+              "$NETWORKSETUP" -setairportpower "$dev" on >/dev/null 2>&1
+              passive_since=$(date +%s)
+              netlog "$bounces cycles didn't help — network is gone, not the radio. Waiting ${PASSIVE_RETRY}s, radio left on."
+              sleep "$PASSIVE_EVERY"
+            else
+              backoff=$(( backoff * 2 )); [ "$backoff" -gt "$BACKOFF_MAX" ] && backoff=$BACKOFF_MAX
+              netlog "still down; retrying in ${backoff}s"
+              sleep "$backoff"
+            fi
+          fi
+        else
+          sleep 5
+        fi
+        ;;
+    esac
+  done
+}
+
+start_netwatch() {
+  [ "${VIBECAF_NO_NETWATCH:-0}" = "1" ] && return 0
+  netwatch_pid >/dev/null && return 0
+  mkdir -p "$(dirname "$NETLOG")"
+  nohup "$SELF" __netwatch >/dev/null 2>&1 &
+  echo $! > "$NETPIDFILE"
+}
+
+stop_netwatch() {
+  local pid
+  if pid=$(netwatch_pid); then
+    kill "$pid" 2>/dev/null
+    netlog "watchdog stopped"
+  fi
+  rm -f "$NETPIDFILE" "$NETSTATEFILE"
+}
+
+# ── safety guard ─────────────────────────────────────────────────────────────
+#
+# Two ways an awake session ends badly, both of them silent:
+#
+#   1. It is on battery and nobody is watching. Awake mode blocks every sleep
+#      path, so the Mac does not doze at 5% — it runs to zero and dies mid-job.
+#   2. You turned it on, closed the laptop, and forgot. Days of no sleep for a
+#      job that finished in twenty minutes.
+#
+# The guard is a separate process from the network watchdog on purpose: the
+# watchdog is optional (VIBECAF_NO_NETWATCH) and can exit on its own if there
+# is no Wi-Fi interface, and neither of those should disarm the battery floor.
+
+guard_loop() {
+  local started blob src pct now elapsed
+  started=$(cat "$STARTFILE" 2>/dev/null || date +%s)
+  netlog "guard started (floor ${BATTERY_FLOOR}%, deadman $((DEADMAN_SECONDS / 3600))h)"
+
+  while :; do
+    sleep "$GUARD_EVERY"
+
+    # Someone turned awake mode off by hand. Nothing left to guard.
+    clamshell_blocked || { netlog "guard: awake mode already off, exiting"; rm -f "$GUARDPIDFILE"; return; }
+
+    now=$(date +%s)
+    elapsed=$(( now - started ))
+    if [ "$elapsed" -ge "$DEADMAN_SECONDS" ]; then
+      guard_auto_off "dead-man timer: $((elapsed / 3600))h elapsed" && return
+      continue
+    fi
+
+    blob=$(batt_blob)
+    src=$(power_source "$blob")
+    pct=$(battery_num "$blob")
+    if [ "$src" = "Battery" ] && [ -n "${pct:-}" ] && [ "$pct" -le "$BATTERY_FLOOR" ]; then
+      guard_auto_off "battery floor: ${pct}% on battery" && return
+    fi
+  done
+}
+
+# Returns 0 when awake mode is genuinely off. On failure it returns 1 so the
+# caller keeps looping and retries — a battery that is still draining is not a
+# situation to give up on after one attempt.
+guard_auto_off() {  # guard_auto_off <reason>
+  netlog "guard: turning awake mode OFF — $1"
+  if VIBECAF_NONINTERACTIVE=1 turn_off >/dev/null 2>&1; then
+    netlog "guard: awake mode off"
+    "$OSASCRIPT" -e "display notification \"$1\" with title \"Closed-Lid Awake\" subtitle \"Awake mode turned off\"" >/dev/null 2>&1
+    return 0
+  fi
+  netlog "guard: could NOT turn awake mode off (no passwordless sudo for pmset?) — retrying in ${GUARD_EVERY}s"
+  return 1
+}
+
+start_guard() {
+  guard_pid >/dev/null && return 0
+  mkdir -p "$(dirname "$NETLOG")"
+  nohup "$SELF" __guard >/dev/null 2>&1 &
+  echo $! > "$GUARDPIDFILE"
+}
+
+stop_guard() {
+  local pid
+  if pid=$(guard_pid); then
+    # turn_off is what the guard itself calls, so it must not kill its caller
+    # mid-shutdown — that would leave disablesleep set with nothing watching it.
+    [ "$pid" = "$$" ] || kill "$pid" 2>/dev/null
+  fi
+  rm -f "$GUARDPIDFILE"
+}
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+turn_on() {
+  if ! admin_pmset 1; then
+    echo "Cancelled — nothing changed. (Admin rights are required to block lid-close sleep.)"
+    return 1
+  fi
+
+  # Don't touch caffeinate processes other tools are already running.
+  if ! our_caffeinate_pid >/dev/null; then
+    nohup "$CAFFEINATE" "${CAF_FLAGS[@]}" >/dev/null 2>&1 &
+    echo $! > "$PIDFILE"
+  fi
+  date +%s > "$STARTFILE"
+  start_netwatch
+  start_guard
+
+  local blob src pct note
+  blob=$(batt_blob); src=$(power_source "$blob"); pct=$(battery_pct "$blob")
+  note=""
+  [ "$src" = "Battery" ] && note="
+
+⚠️  On battery ($pct). The Mac will not sleep, so it will drain — but the guard
+turns awake mode off by itself at ${BATTERY_FLOOR}%. Plug in if the job is long."
+
+  echo "AWAKE MODE: ON
+
+Lid-close sleep blocked (pmset disablesleep 1)
+caffeinate ${CAF_FLAGS[*]} running (pid $(cat "$PIDFILE"))
+Wi-Fi watchdog running (pid $(cat "$NETPIDFILE" 2>/dev/null || echo off))
+Guard running (pid $(cat "$GUARDPIDFILE" 2>/dev/null || echo off)) — off at ${BATTERY_FLOOR}% battery or after $((DEADMAN_SECONDS / 3600))h
+Power: $src $pct
+
+Close the lid and work keeps running. Run this again to turn it off.$note"
+}
+
+turn_off() {
+  local pid
+  if pid=$(our_caffeinate_pid); then kill "$pid" 2>/dev/null; fi
+  rm -f "$PIDFILE" "$STARTFILE"
+  stop_netwatch
+  stop_guard
+
+  # Revert unconditionally rather than only when detection says it's set —
+  # a stuck disablesleep means the Mac never sleeps again, so never skip it.
+  if ! admin_pmset 0; then
+    echo "caffeinate stopped, but lid-close sleep is STILL blocked
+(admin rights were not granted). Run again, or:
+    sudo pmset -a disablesleep 0"
+    return 1
+  fi
+
+  echo "AWAKE MODE: OFF
+
+Normal sleep behaviour restored. Closing the lid will sleep the Mac again."
+}
+
+# Cheap by default: pmset and pidfiles only, no network probe. Pass --net to
+# force a live probe. The menu bar polls this on a timer, and a probe there
+# costs 8.5s whenever the network is down — which is exactly when the app is
+# most needed and least allowed to hang.
+status() {
+  local pid npid gpid state net blob started left
+  if [ "${1:-}" = "--net" ]; then
+    net_state; net=$(net_words $?)
+  else
+    net=$(cheap_net)
+  fi
+
+  pid=$(our_caffeinate_pid)  || pid="none"
+  npid=$(netwatch_pid)       || npid="none"
+  gpid=$(guard_pid)          || gpid="none"
+  if clamshell_blocked; then state="ON"; else state="OFF"; fi
+  blob=$(batt_blob)
+
+  left="n/a"
+  if [ "$state" = "ON" ] && started=$(cat "$STARTFILE" 2>/dev/null) && [ -n "${started:-}" ]; then
+    left=$(( DEADMAN_SECONDS - ( $(date +%s) - started ) ))
+    [ "$left" -lt 0 ] && left=0
+    left="$(( left / 3600 ))h $(( (left % 3600) / 60 ))m"
+  fi
+
+  echo "AWAKE MODE: $state
+Lid-close sleep blocked: $([ "$state" = "ON" ] && echo yes || echo no)
+caffeinate pid: $pid
+Wi-Fi watchdog pid: $npid
+Guard pid: $gpid
+Auto-off in: $left
+Battery floor: ${BATTERY_FLOOR}%
+Network: $net
+Power: $(power_source "$blob") $(battery_pct "$blob")"
+}
+
+case "${1:-toggle}" in
+  on)      turn_on ;;
+  off)     turn_off ;;
+  status)  status "${2:-}" ;;
+  netlog)  [ -f "$NETLOG" ] && tail -40 "$NETLOG" || echo "no watchdog log yet" ;;
+  toggle)
+    if clamshell_blocked || our_caffeinate_pid >/dev/null; then turn_off; else turn_on; fi ;;
+  __netwatch) netwatch_loop ;;
+  __guard)    guard_loop ;;
+  *)       echo "usage: vibecaf [on|off|toggle|status [--net]|netlog]" >&2; exit 2 ;;
+esac
+
+# Exercising the guard without waiting six hours:
+#
+#   VIBECAF_DEADMAN_SECONDS=20 VIBECAF_GUARD_EVERY=5 vibecaf on
+#   sleep 40; vibecaf status        # AWAKE MODE: OFF, reason in `vibecaf netlog`
+#
+#   VIBECAF_BATTERY_FLOOR=100 VIBECAF_GUARD_EVERY=5 vibecaf on   # on battery,
+#   fires on the first check because every level is "at or below" the floor.
