@@ -1,0 +1,18 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/vibecaf-guardian-plist.XXXXXX")
+trap 'rm -rf "$TEST_ROOT"' EXIT
+
+PLIST="$TEST_ROOT/app.closedlidawake.guardian.plist"
+VIBECAF="/tmp/Closed-Lid Awake.app/Contents/Resources/vibecaf"
+"$ROOT/scripts/write-guardian-plist.sh" "$PLIST" "$VIBECAF"
+
+[ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$PLIST")" = "app.closedlidawake.guardian" ]
+[ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$PLIST")" = "$VIBECAF" ]
+[ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:1' "$PLIST")" = "__guardian" ]
+[ "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:VIBECAF_NONINTERACTIVE' "$PLIST")" = "1" ]
+[ "$(/usr/libexec/PlistBuddy -c 'Print :KeepAlive' "$PLIST")" = "true" ]
+
+echo "guardian plist: ok"

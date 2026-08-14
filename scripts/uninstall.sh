@@ -5,6 +5,8 @@ APP="$HOME/Applications/Closed-Lid Awake.app"
 WRAPPER="$HOME/.local/bin/vibecaf"
 LABEL="app.closedlidawake.ClosedLidAwake"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+GUARDIAN_LABEL="app.closedlidawake.guardian"
+GUARDIAN_PLIST="$HOME/Library/LaunchAgents/$GUARDIAN_LABEL.plist"
 account=$(id -un)
 
 if [ -x "$WRAPPER" ]; then
@@ -15,7 +17,8 @@ if [ -x "$WRAPPER" ]; then
 fi
 
 /bin/launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-rm -f "$PLIST" "$WRAPPER"
+/bin/launchctl bootout "gui/$(id -u)/$GUARDIAN_LABEL" 2>/dev/null || true
+rm -f "$PLIST" "$GUARDIAN_PLIST" "$WRAPPER"
 rm -rf "$APP"
 
 rule="/etc/sudoers.d/closed-lid-awake-$account"

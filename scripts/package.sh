@@ -19,11 +19,13 @@ mkdir -p "$STAGE"
 /usr/bin/ditto "$ROOT/dist/Closed-Lid Awake.app" "$STAGE/Closed-Lid Awake.app"
 cp "$ROOT/scripts/install.sh" "$STAGE/install.sh"
 cp "$ROOT/scripts/uninstall.sh" "$STAGE/uninstall.sh"
+mkdir -p "$STAGE/scripts"
+cp "$ROOT/scripts/write-guardian-plist.sh" "$STAGE/scripts/write-guardian-plist.sh"
 cp "$ROOT/README.md" "$ROOT/SECURITY.md" "$ROOT/RELEASE_CHECKLIST.md" \
   "$ROOT/CHANGELOG.md" "$ROOT/LICENSE" "$STAGE/"
 mkdir -p "$STAGE/assets"
 cp "$ROOT/assets/app-icon.png" "$STAGE/assets/"
-chmod 0755 "$STAGE/install.sh" "$STAGE/uninstall.sh"
+chmod 0755 "$STAGE/install.sh" "$STAGE/uninstall.sh" "$STAGE/scripts/write-guardian-plist.sh"
 
 (cd "$(dirname "$STAGE")" && /usr/bin/zip -qry -X "$ZIP" "$NAME")
 (cd "$ROOT/dist" && /usr/bin/shasum -a 256 "$(basename "$ZIP")" > "$(basename "$ZIP").sha256")

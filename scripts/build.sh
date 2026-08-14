@@ -16,6 +16,7 @@ rm -rf "$BUILD_DIR" "$APP"
 mkdir -p "$BUILD_DIR" "$MACOS" "$RESOURCES" "$ICONSET"
 
 objects=()
+thermal_objects=()
 for arch in $ARCHS; do
   output="$BUILD_DIR/ClosedLidAwake-$arch"
   xcrun swiftc \
@@ -26,6 +27,14 @@ for arch in $ARCHS; do
     "$ROOT/src/ClosedLidAwake.swift" \
     -o "$output"
   objects+=("$output")
+
+  thermal_output="$BUILD_DIR/vibecaf-thermal-$arch"
+  xcrun swiftc \
+    -O \
+    -target "$arch-apple-macosx13.0" \
+    "$ROOT/src/ThermalState.swift" \
+    -o "$thermal_output"
+  thermal_objects+=("$thermal_output")
 done
 
 if [ "${#objects[@]}" -eq 1 ]; then
@@ -34,7 +43,14 @@ else
   xcrun lipo -create "${objects[@]}" -output "$MACOS/ClosedLidAwake"
 fi
 
+if [ "${#thermal_objects[@]}" -eq 1 ]; then
+  cp "${thermal_objects[0]}" "$RESOURCES/vibecaf-thermal"
+else
+  xcrun lipo -create "${thermal_objects[@]}" -output "$RESOURCES/vibecaf-thermal"
+fi
+
 install -m 0755 "$ROOT/bin/vibecaf" "$RESOURCES/vibecaf"
+chmod 0755 "$RESOURCES/vibecaf-thermal"
 
 xcrun swiftc "$ROOT/src/makeicon.swift" -o "$BUILD_DIR/makeicon"
 "$BUILD_DIR/makeicon" "$BUILD_DIR/appicon.png"

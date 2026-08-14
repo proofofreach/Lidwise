@@ -34,6 +34,8 @@ DEST_APP="$DEST_DIR/$APP_NAME"
 BIN_DIR="$HOME/.local/bin"
 WRAPPER="$BIN_DIR/vibecaf"
 LOGIN_PLIST="$HOME/Library/LaunchAgents/app.closedlidawake.ClosedLidAwake.plist"
+GUARDIAN_LABEL="app.closedlidawake.guardian"
+GUARDIAN_PLIST="$HOME/Library/LaunchAgents/$GUARDIAN_LABEL.plist"
 
 if [ -x "$WRAPPER" ] && "$WRAPPER" status 2>/dev/null | grep -q '^AWAKE MODE: ON'; then
   echo "Awake mode is on. Turn it off before upgrading:" >&2
@@ -74,8 +76,14 @@ if [ "$with_sudoers" -eq 1 ]; then
     "/etc/sudoers.d/closed-lid-awake-$account"
 fi
 
+mkdir -p "$HOME/Library/Logs"
+/bin/launchctl bootout "gui/$(id -u)/$GUARDIAN_LABEL" 2>/dev/null || true
+"$ROOT/scripts/write-guardian-plist.sh" \
+  "$GUARDIAN_PLIST" "$DEST_APP/Contents/Resources/vibecaf"
+/bin/launchctl bootstrap "gui/$(id -u)" "$GUARDIAN_PLIST"
+
 echo "Installed $DEST_APP"
 echo "Open it from ~/Applications, or run: $WRAPPER status"
 if [ "$with_sudoers" -eq 0 ]; then
-  echo "Warning: the unattended battery and time guard cannot disable sleep without the sudoers rule."
+  echo "Warning: unattended safety recovery cannot disable sleep without the sudoers rule."
 fi

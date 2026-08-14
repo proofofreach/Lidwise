@@ -7,23 +7,30 @@
 # it is `pmset disablesleep 1`. This script pairs the two, and runs a network
 # watchdog that re-joins known Wi-Fi if the link drops while you're not looking.
 #
-# Usage: vibecaf [on|off|toggle|status|netlog]
+# Usage: vibecaf [on|off|toggle|status|netlog|goals|goal]
 
 set -u
 
-PMSET=/usr/bin/pmset
-CAFFEINATE=/usr/bin/caffeinate
-NETWORKSETUP=/usr/sbin/networksetup
-OSASCRIPT=/usr/bin/osascript
+PMSET=${VIBECAF_PMSET:-/usr/bin/pmset}
+CAFFEINATE=${VIBECAF_CAFFEINATE:-/usr/bin/caffeinate}
+NETWORKSETUP=${VIBECAF_NETWORKSETUP:-/usr/sbin/networksetup}
+OSASCRIPT=${VIBECAF_OSASCRIPT:-/usr/bin/osascript}
+SUDO=${VIBECAF_SUDO:-/usr/bin/sudo}
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+THERMAL_STATE_CMD=${VIBECAF_THERMAL_STATE_CMD:-"$(dirname "$SELF")/vibecaf-thermal"}
 
-PIDFILE="/tmp/vibecaf.$(id -u).pid"
-NETPIDFILE="/tmp/vibecaf-net.$(id -u).pid"
-GUARDPIDFILE="/tmp/vibecaf-guard.$(id -u).pid"
-STARTFILE="/tmp/vibecaf-started.$(id -u)"
+RUNTIME_DIR=${VIBECAF_RUNTIME_DIR:-/tmp}
+STATE_DIR=${VIBECAF_STATE_DIR:-"$HOME/Library/Application Support/Closed-Lid Awake"}
+GOALS_DIR="$STATE_DIR/goals"
+SESSION_DIR="$STATE_DIR/session"
+
+PIDFILE="$RUNTIME_DIR/vibecaf.$(id -u).pid"
+NETPIDFILE="$RUNTIME_DIR/vibecaf-net.$(id -u).pid"
+GUARDPIDFILE="$RUNTIME_DIR/vibecaf-guard.$(id -u).pid"
+STARTFILE="$SESSION_DIR/started"
 # The watchdog's latest verdict, so `status` can report the network without
 # running its own probe. See net_state / cheap_net.
-NETSTATEFILE="/tmp/vibecaf-net-state.$(id -u)"
+NETSTATEFILE="$RUNTIME_DIR/vibecaf-net-state.$(id -u)"
 NETLOG="$HOME/Library/Logs/vibecaf-net.log"
 
 # -i idle system sleep, -m disk idle sleep, -s system sleep while on AC.
@@ -43,6 +50,10 @@ CAF_FLAGS=(-i -m -s)
 BATTERY_FLOOR=${VIBECAF_BATTERY_FLOOR:-20}      # % — below this, on battery, awake mode turns itself off
 DEADMAN_SECONDS=${VIBECAF_DEADMAN_SECONDS:-21600} # 6h — hard ceiling on one session, whatever the power
 GUARD_EVERY=${VIBECAF_GUARD_EVERY:-60}          # how often the guard checks
+THERMAL_STRIKES=${VIBECAF_THERMAL_STRIKES:-3}   # serious readings required; critical is immediate
+GUARDIAN_EVERY=${VIBECAF_GUARDIAN_EVERY:-30}
+GUARDIAN_GRACE=${VIBECAF_GUARDIAN_GRACE:-180}
+THERMAL_STRIKE_FILE="$SESSION_DIR/thermal-strikes"
 
 # Watchdog tuning
 CHECK_EVERY=20        # seconds between probes when healthy
@@ -55,7 +66,18 @@ PASSIVE_RETRY=900     # how long to stay passive before trying the radio again
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-clamshell_blocked() { "$PMSET" -g | grep -q 'SleepDisabled.*1'; }
+sleep_disabled_state() {
+  local output value
+  output=$("$PMSET" -g 2>/dev/null) || { echo unknown; return; }
+  value=$(printf '%s\n' "$output" | awk '$1 == "SleepDisabled" { print $2; exit }')
+  case "$value" in
+    1) echo 1 ;;
+    0) echo 0 ;;
+    *) echo unknown ;;
+  esac
+}
+
+clamshell_blocked() { [ "$(sleep_disabled_state)" = "1" ]; }
 
 wifi_device() {
   "$NETWORKSETUP" -listallhardwareports \
@@ -76,13 +98,13 @@ guard_pid()          { pid_alive "$GUARDPIDFILE"; }
 # two disablesleep commands. The osascript branch is the fallback when that
 # rule is not installed.
 admin_pmset() {
-  if /usr/bin/sudo -n "$PMSET" -a disablesleep "$1" >/dev/null 2>&1; then
+  if "$SUDO" -n "$PMSET" -a disablesleep "$1" >/dev/null 2>&1; then
     return 0
   fi
   # The guard runs unattended behind a closed lid. An admin dialog there waits
   # forever for someone who isn't there, so it must fail instead of prompting.
   [ "${VIBECAF_NONINTERACTIVE:-0}" = "1" ] && return 1
-  "$OSASCRIPT" -e "do shell script \"$PMSET -a disablesleep $1\" with administrator privileges" >/dev/null 2>&1
+  "$OSASCRIPT" -e "do shell script \"/usr/bin/pmset -a disablesleep $1\" with administrator privileges" >/dev/null 2>&1
 }
 
 # `pmset` is a fork+exec, and status runs on every menu open. Read the battery
@@ -93,9 +115,276 @@ power_source() { case "$1" in *"AC Power"*) echo AC ;; *) echo Battery ;; esac; 
 battery_pct()  { printf '%s' "$1" | grep -o '[0-9]\+%' | head -1; }
 battery_num()  { battery_pct "$1" | tr -d '%'; }
 
+thermal_state() {
+  if [ -x "$THERMAL_STATE_CMD" ]; then
+    "$THERMAL_STATE_CMD" 2>/dev/null || echo unknown
+  else
+    echo unknown
+  fi
+}
+
+notify_event() {  # notify_event <title> <body>
+  local title=$1 body=$2
+  if [ -n "${VIBECAF_NOTIFY_LOG:-}" ]; then
+    printf '%s\t%s\n' "$title" "$body" >> "$VIBECAF_NOTIFY_LOG"
+    return 0
+  fi
+  "$OSASCRIPT" \
+    -e 'on run argv' \
+    -e 'display notification (item 2 of argv) with title (item 1 of argv)' \
+    -e 'end run' \
+    -- "$title" "$body" >/dev/null 2>&1 || true
+  if [ -n "${VIBECAF_NTFY_URL:-}" ]; then
+    nohup curl -fsS --max-time 5 \
+      -H "Title: $title" \
+      --data-binary "$body" \
+      "$VIBECAF_NTFY_URL" >/dev/null 2>&1 &
+  fi
+  return 0
+}
+
+# ── goal registry ────────────────────────────────────────────────────────────
+#
+# Goals are observations inside an awake work window. They never own that
+# window and no goal transition calls turn_on or turn_off.
+
+goal_id() { printf '%s' "$1" | /usr/bin/shasum -a 256 | awk '{print substr($1,1,16)}'; }
+
+goal_dir() { printf '%s/%s\n' "$GOALS_DIR" "$(goal_id "$1")"; }
+
+valid_goal_name() {
+  [ -n "$1" ] || return 1
+  case "$1" in *$'\n'*|*$'\t'*) return 1 ;; esac
+}
+
+write_field() {  # write_field <directory> <field> <value>
+  local dir=$1 field=$2 value=$3 tmp
+  mkdir -p "$dir"
+  tmp="$dir/.$field.$$"
+  printf '%s\n' "$value" > "$tmp"
+  mv "$tmp" "$dir/$field"
+}
+
+session_begin() {
+  local now
+  now=$(date +%s)
+  mkdir -p "$SESSION_DIR" "$RUNTIME_DIR" || return 1
+  write_field "$SESSION_DIR" owned "$now" || return 1
+  write_field "$SESSION_DIR" active active || return 1
+  write_field "$SESSION_DIR" started "$now" || return 1
+  write_field "$SESSION_DIR" heartbeat "$now" || return 1
+  write_field "$SESSION_DIR" deadline "$((now + DEADMAN_SECONDS))" || return 1
+  write_field "$SESSION_DIR" thermal-strikes 0 || return 1
+  rm -f "$SESSION_DIR/enabling-pid" "$SESSION_DIR/last-alert"
+}
+
+session_claim() {
+  mkdir -p "$SESSION_DIR" "$RUNTIME_DIR" || return 1
+  write_field "$SESSION_DIR" owned "$(date +%s)" || return 1
+  write_field "$SESSION_DIR" enabling-pid "$$" || return 1
+}
+
+session_touch() {
+  [ -f "$SESSION_DIR/active" ] || return 1
+  write_field "$SESSION_DIR" heartbeat "$(date +%s)"
+}
+
+session_clear() {
+  rm -f "$SESSION_DIR/owned" "$SESSION_DIR/active" "$SESSION_DIR/enabling-pid" \
+    "$SESSION_DIR/started" "$SESSION_DIR/heartbeat" "$SESSION_DIR/deadline" \
+    "$THERMAL_STRIKE_FILE" "$SESSION_DIR/last-alert"
+}
+
+read_field() {  # read_field <directory> <field> [default]
+  local value
+  value=$(sed -n '1p' "$1/$2" 2>/dev/null) || value="${3:-}"
+  printf '%s' "$value"
+}
+
+read_uint() {  # read_uint <directory> <field> [default]
+  local value
+  value=$(read_field "$1" "$2" "${3:-0}")
+  case "$value" in ""|*[!0-9]*) value="${3:-0}" ;; esac
+  printf '%s' "$value"
+}
+
+goal_add() {
+  local name=${1:-} dir now pid="" activity_file="" stale_after=0
+  valid_goal_name "$name" || { echo "goal name must be non-empty and contain no tabs or newlines" >&2; return 2; }
+  shift || true
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --pid)
+        [ "$#" -ge 2 ] || { echo "--pid requires a value" >&2; return 2; }
+        pid=$2; shift 2 ;;
+      --activity-file)
+        [ "$#" -ge 2 ] || { echo "--activity-file requires a path" >&2; return 2; }
+        activity_file=$2; shift 2 ;;
+      --stale-after)
+        [ "$#" -ge 2 ] || { echo "--stale-after requires seconds" >&2; return 2; }
+        stale_after=$2; shift 2 ;;
+      *) echo "unknown goal option: $1" >&2; return 2 ;;
+    esac
+  done
+  case "$pid" in
+    "") ;;
+    *[!0-9]*|0) echo "pid must be a positive integer" >&2; return 2 ;;
+  esac
+  case "$stale_after" in *[!0-9]*) echo "stale-after must be a non-negative integer" >&2; return 2 ;; esac
+  dir=$(goal_dir "$name"); now=$(date +%s)
+  write_field "$dir" name "$name"
+  write_field "$dir" state active
+  write_field "$dir" message ""
+  write_field "$dir" updated_at "$now"
+  write_field "$dir" observed active
+  write_field "$dir" pid "$pid"
+  write_field "$dir" activity_file "$activity_file"
+  write_field "$dir" stale_after "$stale_after"
+  echo "goal added: $name"
+}
+
+goal_transition() {  # goal_transition <state> <name> [message]
+  local state=$1 name=${2:-} message=${3:-} dir previous title
+  dir=$(goal_dir "$name")
+  [ -d "$dir" ] || { echo "unknown goal: $name" >&2; return 1; }
+  previous=$(read_field "$dir" observed unknown)
+  write_field "$dir" state "$state"
+  write_field "$dir" observed "$state"
+  write_field "$dir" message "$message"
+  write_field "$dir" updated_at "$(date +%s)"
+  if [ "$previous" != "$state" ]; then
+    case "$state" in
+      completed) title="Goal completed" ;;
+      failed) title="Goal failed" ;;
+      active) title="Goal active" ;;
+      *) title="Goal changed" ;;
+    esac
+    notify_event "$title" "$name${message:+: $message}"
+  fi
+  echo "goal $state: $name"
+}
+
+goal_remove() {
+  local name=${1:-} dir
+  valid_goal_name "$name" || { echo "goal name is required" >&2; return 2; }
+  dir=$(goal_dir "$name")
+  [ -d "$dir" ] || { echo "unknown goal: $name" >&2; return 1; }
+  rm -rf "$dir"
+  echo "goal removed: $name"
+}
+
+goal_restart() {
+  local name=${1:-} dir
+  dir=$(goal_dir "$name")
+  [ -d "$dir" ] || { echo "unknown goal: $name" >&2; return 1; }
+  goal_add "$@" >/dev/null
+  echo "goal restarted: $name"
+}
+
+goal_activity_time() {
+  local dir=$1 activity_file updated
+  activity_file=$(read_field "$dir" activity_file)
+  if [ -n "$activity_file" ] && [ -e "$activity_file" ]; then
+    stat -f %m "$activity_file" 2>/dev/null && return
+  fi
+  updated=$(read_uint "$dir" updated_at 0)
+  printf '%s\n' "$updated"
+}
+
+goal_refresh() {
+  local dir=$1 declared previous next message pid stale_after last now age title name
+  declared=$(read_field "$dir" state active)
+  previous=$(read_field "$dir" observed unknown)
+  next=$declared; message=$(read_field "$dir" message)
+
+  if [ "$declared" = "active" ]; then
+    pid=$(read_field "$dir" pid)
+    stale_after=$(read_uint "$dir" stale_after 0)
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+      next=stopped; message="process stopped"
+    elif [ "$stale_after" -gt 0 ] 2>/dev/null; then
+      last=$(goal_activity_time "$dir"); now=$(date +%s); age=$((now - last))
+      if [ "$age" -ge "$stale_after" ]; then
+        next=stalled; message="no activity for ${age}s"
+      else
+        next=active; message=""
+      fi
+    else
+      next=active
+    fi
+  fi
+
+  if [ "$next" != "$previous" ]; then
+    write_field "$dir" observed "$next"
+    write_field "$dir" message "$message"
+    name=$(read_field "$dir" name)
+    case "$next" in
+      stalled|stopped) title="Goal needs attention" ;;
+      completed) title="Goal completed" ;;
+      failed) title="Goal failed" ;;
+      active) title="Goal active again" ;;
+      *) title="Goal changed" ;;
+    esac
+    notify_event "$title" "$name${message:+: $message}"
+  fi
+}
+
+goals_refresh() {
+  local dir
+  for dir in "$GOALS_DIR"/*; do
+    [ -d "$dir" ] || continue
+    goal_refresh "$dir"
+  done
+}
+
+goals_summary() {
+  local dir state active=0 stalled=0 completed=0 failed=0
+  for dir in "$GOALS_DIR"/*; do
+    [ -d "$dir" ] || continue
+    state=$(read_field "$dir" observed unknown)
+    case "$state" in
+      active) active=$((active + 1)) ;;
+      stalled|stopped) stalled=$((stalled + 1)) ;;
+      completed) completed=$((completed + 1)) ;;
+      failed) failed=$((failed + 1)) ;;
+    esac
+  done
+  printf '%s active · %s stalled · %s completed · %s failed\n' \
+    "$active" "$stalled" "$completed" "$failed"
+}
+
+goals_list() {
+  local dir name state message
+  [ "${1:-}" = "--refresh" ] && { goals_refresh; shift || true; }
+  [ "${1:-}" = "--summary" ] && { goals_summary; return; }
+  for dir in "$GOALS_DIR"/*; do
+    [ -d "$dir" ] || continue
+    name=$(read_field "$dir" name)
+    state=$(read_field "$dir" observed unknown)
+    message=$(read_field "$dir" message)
+    printf '%s\t%s\t%s\n' "$name" "$state" "$message"
+  done
+}
+
+goal_command() {
+  local action=${1:-}; shift || true
+  case "$action" in
+    add) goal_add "$@" ;;
+    restart) goal_restart "$@" ;;
+    touch) goal_transition active "${1:-}" "${2:-}" ;;
+    complete) goal_transition completed "${1:-}" "${2:-}" ;;
+    fail) goal_transition failed "${1:-}" "${2:-}" ;;
+    remove) goal_remove "${1:-}" ;;
+    *) echo "usage: vibecaf goal <add|restart|touch|complete|fail|remove> <name> [options]" >&2; return 2 ;;
+  esac
+}
+
 # ── network watchdog ─────────────────────────────────────────────────────────
 
-netlog() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$NETLOG"; }
+netlog() {
+  mkdir -p "$(dirname "$NETLOG")"
+  printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$NETLOG"
+}
 
 # 0 = fully online, 1 = link up but no internet (captive portal / LAN only),
 # 2 = no usable link.
@@ -125,6 +414,17 @@ net_words() {  # net_words <net_state return code>
 # matters because net_state costs 8.5s when the network is down (6s curl
 # timeout + 2.5s ping), and the menu bar used to pay it on a 20s timer.
 publish_net() { printf '%s %s\n' "$(date +%s)" "$1" > "$NETSTATEFILE"; }
+
+notify_network_transition() {  # notify_network_transition <previous> <current>
+  local previous=${1:-} current=${2:-}
+  [ -n "$previous" ] || return 0
+  [ "$previous" != "$current" ] || return 0
+  case "$current" in
+    0) notify_event "Network recovered" "Internet access is available again" ;;
+    1) notify_event "Network degraded" "Link is up, but the internet is unreachable" ;;
+    2) notify_event "Network disconnected" "No usable network link" ;;
+  esac
+}
 
 cheap_net() {
   local ts words now
@@ -166,7 +466,7 @@ wifi_bounce() {
 }
 
 netwatch_loop() {
-  local dev fails=0 backoff=$CHECK_EVERY recoveries=0 bounces=0 passive_since=0 now
+  local dev fails=0 backoff=$CHECK_EVERY recoveries=0 bounces=0 passive_since=0 now last_st="" st
   dev=$(wifi_device)
   if [ -z "${dev:-}" ]; then netlog "no Wi-Fi interface found; watchdog exiting"; return; fi
   netlog "watchdog started on $dev"
@@ -179,8 +479,10 @@ netwatch_loop() {
   fi
 
   while :; do
-    net_state; local st=$?
+    net_state; st=$?
     publish_net "$(net_words "$st")"
+    notify_network_transition "$last_st" "$st"
+    last_st=$st
     case $st in
       0)
         if [ "$fails" -gt 0 ]; then netlog "back online after $fails failed probe(s)"; fi
@@ -259,42 +561,68 @@ stop_netwatch() {
 
 # ── safety guard ─────────────────────────────────────────────────────────────
 #
-# Two ways an awake session ends badly, both of them silent:
+# Three ways an awake session ends badly, all of them silent:
 #
 #   1. It is on battery and nobody is watching. Awake mode blocks every sleep
 #      path, so the Mac does not doze at 5% — it runs to zero and dies mid-job.
 #   2. You turned it on, closed the laptop, and forgot. Days of no sleep for a
 #      job that finished in twenty minutes.
+#   3. Sustained work pushes macOS into serious or critical thermal pressure.
 #
 # The guard is a separate process from the network watchdog on purpose: the
 # watchdog is optional (VIBECAF_NO_NETWATCH) and can exit on its own if there
 # is no Wi-Fi interface, and neither of those should disarm the battery floor.
 
+guard_check_once() {
+  local started blob src pct now elapsed thermal strikes
+  clamshell_blocked || return 0
+  session_touch || true
+
+  started=$(read_uint "$SESSION_DIR" started "$(date +%s)")
+  now=$(date +%s); elapsed=$((now - started))
+  if [ "$elapsed" -ge "$DEADMAN_SECONDS" ]; then
+    guard_auto_off "dead-man timer: $((elapsed / 3600))h elapsed"
+    return
+  fi
+
+  thermal=$(thermal_state)
+  strikes=$(read_uint "$SESSION_DIR" thermal-strikes 0)
+  case "$thermal" in
+    critical)
+      guard_auto_off "thermal pressure: critical"
+      return ;;
+    serious)
+      strikes=$((strikes + 1)); write_field "$SESSION_DIR" thermal-strikes "$strikes"
+      if [ "$strikes" -ge "$THERMAL_STRIKES" ]; then
+        guard_auto_off "thermal pressure: serious for $strikes checks"
+        return
+      fi ;;
+    *) write_field "$SESSION_DIR" thermal-strikes 0 ;;
+  esac
+
+  blob=$(batt_blob); src=$(power_source "$blob"); pct=$(battery_num "$blob")
+  if [ "$src" = "Battery" ] && [ -n "${pct:-}" ] && [ "$pct" -le "$BATTERY_FLOOR" ]; then
+    guard_auto_off "battery floor: ${pct}% on battery"
+    return
+  fi
+
+  goals_refresh
+}
+
 guard_loop() {
-  local started blob src pct now elapsed
-  started=$(cat "$STARTFILE" 2>/dev/null || date +%s)
-  netlog "guard started (floor ${BATTERY_FLOOR}%, deadman $((DEADMAN_SECONDS / 3600))h)"
-
+  local sleep_state
+  netlog "guard started (floor ${BATTERY_FLOOR}%, deadman $((DEADMAN_SECONDS / 3600))h, thermal serious/$THERMAL_STRIKES)"
   while :; do
+    sleep_state=$(sleep_disabled_state)
+    case "$sleep_state" in
+      0) break ;;
+      1) guard_check_once || true ;;
+      unknown) netlog "guard: could not read SleepDisabled; keeping recovery armed" ;;
+    esac
     sleep "$GUARD_EVERY"
-
-    # Someone turned awake mode off by hand. Nothing left to guard.
-    clamshell_blocked || { netlog "guard: awake mode already off, exiting"; rm -f "$GUARDPIDFILE"; return; }
-
-    now=$(date +%s)
-    elapsed=$(( now - started ))
-    if [ "$elapsed" -ge "$DEADMAN_SECONDS" ]; then
-      guard_auto_off "dead-man timer: $((elapsed / 3600))h elapsed" && return
-      continue
-    fi
-
-    blob=$(batt_blob)
-    src=$(power_source "$blob")
-    pct=$(battery_num "$blob")
-    if [ "$src" = "Battery" ] && [ -n "${pct:-}" ] && [ "$pct" -le "$BATTERY_FLOOR" ]; then
-      guard_auto_off "battery floor: ${pct}% on battery" && return
-    fi
   done
+  netlog "guard: awake mode off, exiting"
+  rm -f "$GUARDPIDFILE"
 }
 
 # Returns 0 when awake mode is genuinely off. On failure it returns 1 so the
@@ -304,11 +632,87 @@ guard_auto_off() {  # guard_auto_off <reason>
   netlog "guard: turning awake mode OFF — $1"
   if VIBECAF_NONINTERACTIVE=1 turn_off >/dev/null 2>&1; then
     netlog "guard: awake mode off"
-    "$OSASCRIPT" -e "display notification \"$1\" with title \"Closed-Lid Awake\" subtitle \"Awake mode turned off\"" >/dev/null 2>&1
+    notify_event "Awake mode turned off" "$1"
     return 0
+  fi
+  if [ "$(read_field "$SESSION_DIR" last-alert)" != "$1" ]; then
+    write_field "$SESSION_DIR" last-alert "$1"
+    notify_event "Safety recovery failed" "$1; normal sleep is still blocked"
   fi
   netlog "guard: could NOT turn awake mode off (no passwordless sudo for pmset?) — retrying in ${GUARD_EVERY}s"
   return 1
+}
+
+guardian_recover() {
+  local reason=$1
+  netlog "guardian: restoring normal sleep — $reason"
+  if VIBECAF_NONINTERACTIVE=1 turn_off >/dev/null 2>&1; then
+    notify_event "Awake mode recovered" "$reason"
+    return 0
+  fi
+  if [ "$(read_field "$SESSION_DIR" last-alert)" != "guardian:$reason" ]; then
+    write_field "$SESSION_DIR" last-alert "guardian:$reason"
+    notify_event "Crash recovery failed" "$reason; normal sleep is still blocked"
+  fi
+  netlog "guardian: restore failed; retrying"
+  return 1
+}
+
+guardian_check_once() {
+  local heartbeat now age deadline enabling sleep_state
+  sleep_state=$(sleep_disabled_state)
+  [ "$sleep_state" = "unknown" ] && { netlog "guardian: could not read SleepDisabled; retaining ownership"; return 1; }
+  if [ "$sleep_state" = "0" ]; then
+    if [ -f "$SESSION_DIR/active" ]; then
+      session_clear
+    elif [ -f "$SESSION_DIR/owned" ]; then
+      enabling=$(read_uint "$SESSION_DIR" enabling-pid 0)
+      if [ "$enabling" -eq 0 ] || ! kill -0 "$enabling" 2>/dev/null; then
+        session_clear
+      fi
+    fi
+    return 0
+  fi
+  [ -f "$SESSION_DIR/owned" ] || return 0
+
+  now=$(date +%s)
+  if [ ! -f "$SESSION_DIR/active" ]; then
+    enabling=$(read_uint "$SESSION_DIR" enabling-pid 0)
+    if [ "$enabling" -eq 0 ] || ! kill -0 "$enabling" 2>/dev/null; then
+      guardian_recover "session activation did not finish"
+    fi
+    return
+  fi
+  heartbeat=$(read_uint "$SESSION_DIR" heartbeat 0)
+  age=$((now - heartbeat))
+  if [ "$age" -gt "$GUARDIAN_GRACE" ]; then
+    guardian_recover "guard heartbeat lost"
+    return
+  fi
+
+  deadline=$(read_uint "$SESSION_DIR" deadline 0)
+  if [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; then
+    guardian_recover "work-window deadline passed"
+  fi
+}
+
+guardian_loop() {
+  netlog "guardian started (heartbeat grace ${GUARDIAN_GRACE}s)"
+  while :; do
+    guardian_check_once || true
+    sleep "$GUARDIAN_EVERY"
+  done
+}
+
+guardian_status() {
+  local label="app.closedlidawake.guardian" domain="gui/$(id -u)"
+  if /bin/launchctl print "$domain/$label" >/dev/null 2>&1; then
+    echo running
+  elif [ -f "$HOME/Library/LaunchAgents/$label.plist" ]; then
+    echo installed
+  else
+    echo missing
+  fi
 }
 
 start_guard() {
@@ -331,7 +735,12 @@ stop_guard() {
 # ── commands ─────────────────────────────────────────────────────────────────
 
 turn_on() {
+  if ! session_claim; then
+    echo "Could not create the durable recovery record. Awake mode was not enabled." >&2
+    return 1
+  fi
   if ! admin_pmset 1; then
+    session_clear
     echo "Cancelled — nothing changed. (Admin rights are required to block lid-close sleep.)"
     return 1
   fi
@@ -341,7 +750,11 @@ turn_on() {
     nohup "$CAFFEINATE" "${CAF_FLAGS[@]}" >/dev/null 2>&1 &
     echo $! > "$PIDFILE"
   fi
-  date +%s > "$STARTFILE"
+  if ! session_begin; then
+    echo "Could not finalize the recovery record. Restoring normal sleep." >&2
+    turn_off >/dev/null 2>&1 || true
+    return 1
+  fi
   start_netwatch
   start_guard
 
@@ -367,7 +780,6 @@ Close the lid and work keeps running. Run this again to turn it off.$note"
 turn_off() {
   local pid
   if pid=$(our_caffeinate_pid); then kill "$pid" 2>/dev/null; fi
-  rm -f "$PIDFILE" "$STARTFILE"
   stop_netwatch
   stop_guard
 
@@ -380,6 +792,9 @@ turn_off() {
     return 1
   fi
 
+  rm -f "$PIDFILE"
+  session_clear
+
   echo "AWAKE MODE: OFF
 
 Normal sleep behaviour restored. Closing the lid will sleep the Mac again."
@@ -390,7 +805,7 @@ Normal sleep behaviour restored. Closing the lid will sleep the Mac again."
 # costs 8.5s whenever the network is down — which is exactly when the app is
 # most needed and least allowed to hang.
 status() {
-  local pid npid gpid state net blob started left
+  local pid npid gpid state sleep_state net blob started left goals thermal guardian
   if [ "${1:-}" = "--net" ]; then
     net_state; net=$(net_words $?)
   else
@@ -400,11 +815,17 @@ status() {
   pid=$(our_caffeinate_pid)  || pid="none"
   npid=$(netwatch_pid)       || npid="none"
   gpid=$(guard_pid)          || gpid="none"
-  if clamshell_blocked; then state="ON"; else state="OFF"; fi
+  sleep_state=$(sleep_disabled_state)
+  case "$sleep_state" in 1) state="ON" ;; 0) state="OFF" ;; *) state="UNKNOWN" ;; esac
   blob=$(batt_blob)
+  goals_refresh
+  goals=$(goals_summary)
+  thermal=$(thermal_state)
+  guardian=$(guardian_status)
 
   left="n/a"
-  if [ "$state" = "ON" ] && started=$(cat "$STARTFILE" 2>/dev/null) && [ -n "${started:-}" ]; then
+  if [ "$state" = "ON" ] && [ -f "$STARTFILE" ]; then
+    started=$(read_uint "$SESSION_DIR" started "$(date +%s)")
     left=$(( DEADMAN_SECONDS - ( $(date +%s) - started ) ))
     [ "$left" -lt 0 ] && left=0
     left="$(( left / 3600 ))h $(( (left % 3600) / 60 ))m"
@@ -415,8 +836,11 @@ Lid-close sleep blocked: $([ "$state" = "ON" ] && echo yes || echo no)
 caffeinate pid: $pid
 Wi-Fi watchdog pid: $npid
 Guard pid: $gpid
+Crash guardian: $guardian
 Auto-off in: $left
 Battery floor: ${BATTERY_FLOOR}%
+Thermal: $thermal
+Goals: $goals
 Network: $net
 Power: $(power_source "$blob") $(battery_pct "$blob")"
 }
@@ -426,11 +850,25 @@ case "${1:-toggle}" in
   off)     turn_off ;;
   status)  status "${2:-}" ;;
   netlog)  [ -f "$NETLOG" ] && tail -40 "$NETLOG" || echo "no watchdog log yet" ;;
+  goals)   goals_list "${2:-}" ;;
+  goal)    shift; goal_command "$@" ;;
   toggle)
-    if clamshell_blocked || our_caffeinate_pid >/dev/null; then turn_off; else turn_on; fi ;;
+    sleep_state=$(sleep_disabled_state)
+    if [ "$sleep_state" = "1" ] || our_caffeinate_pid >/dev/null; then
+      turn_off
+    elif [ "$sleep_state" = "0" ]; then
+      turn_on
+    else
+      echo "Cannot read SleepDisabled; refusing to change power state." >&2
+      exit 1
+    fi ;;
   __netwatch) netwatch_loop ;;
   __guard)    guard_loop ;;
-  *)       echo "usage: vibecaf [on|off|toggle|status [--net]|netlog]" >&2; exit 2 ;;
+  __guard_once) guard_check_once ;;
+  __guardian) guardian_loop ;;
+  __guardian_once) guardian_check_once ;;
+  __network_transition) notify_network_transition "${2:-}" "${3:-}" ;;
+  *)       echo "usage: vibecaf [on|off|toggle|status [--net]|netlog|goals|goal ...]" >&2; exit 2 ;;
 esac
 
 # Exercising the guard without waiting six hours:

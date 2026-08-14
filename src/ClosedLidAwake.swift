@@ -31,8 +31,11 @@ struct State {
     var netOK = false
     var watchdog = false
     var guarded = false
+    var guardian = ""
     var autoOff = ""
     var floor = ""
+    var thermal = ""
+    var goals = ""
 }
 
 // `probeNet: false` is the cheap path — pmset and pidfiles only, and the
@@ -53,8 +56,11 @@ func readState(probeNet: Bool = false) -> State {
         }
         if line.hasPrefix("Wi-Fi watchdog pid:") { s.watchdog = !line.contains("none") }
         if line.hasPrefix("Guard pid:") { s.guarded = !line.contains("none") }
+        if line.hasPrefix("Crash guardian:") { s.guardian = line.replacingOccurrences(of: "Crash guardian: ", with: "") }
         if line.hasPrefix("Auto-off in:") { s.autoOff = line.replacingOccurrences(of: "Auto-off in: ", with: "") }
         if line.hasPrefix("Battery floor:") { s.floor = line.replacingOccurrences(of: "Battery floor: ", with: "") }
+        if line.hasPrefix("Thermal:") { s.thermal = line.replacingOccurrences(of: "Thermal: ", with: "") }
+        if line.hasPrefix("Goals:") { s.goals = line.replacingOccurrences(of: "Goals: ", with: "") }
     }
     return s
 }
@@ -117,6 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let headerItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let powerItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let netItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    let goalsItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let netLogItem = NSMenuItem(title: "Open Wi-Fi watchdog log", action: #selector(openNetLog), keyEquivalent: "")
     let toggleItem = NSMenuItem(title: "", action: #selector(toggle), keyEquivalent: "a")
     let hotkeyItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -126,10 +133,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         menu.delegate = self
-        for i in [headerItem, powerItem, netItem, hotkeyItem] { i.isEnabled = false }
+        for i in [headerItem, powerItem, netItem, goalsItem, hotkeyItem] { i.isEnabled = false }
         menu.addItem(headerItem)
         menu.addItem(powerItem)
         menu.addItem(netItem)
+        menu.addItem(goalsItem)
         menu.addItem(.separator())
         menu.addItem(toggleItem)
         menu.addItem(hotkeyItem)
@@ -341,12 +349,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             headerItem.title = "Awake mode: OFF"
         }
         // On battery the guard is the reason this is a warning and not a threat.
-        powerItem.title = state.on && state.onBattery
+        let thermal = state.thermal.isEmpty ? "" : " · thermal \(state.thermal)"
+        powerItem.title = (state.on && state.onBattery
             ? "\(state.power)  ⚠︎ draining — auto-off at \(state.floor.isEmpty ? "the battery floor" : state.floor)"
-            : state.power
+            : state.power) + thermal
         let wd = state.watchdog ? "watchdog on" : "watchdog off"
         let gd = state.guarded ? "guard on" : "⚠︎ guard off"
-        netItem.title = "Network: \(state.net)\(state.on ? " · \(wd) · \(gd)" : "")"
+        let recovery = state.guardian == "running" ? "recovery on" : "⚠︎ recovery \(state.guardian.isEmpty ? "unknown" : state.guardian)"
+        netItem.title = "Network: \(state.net)\(state.on ? " · \(wd) · \(gd) · \(recovery)" : "")"
+        goalsItem.title = "Goals: \(state.goals.isEmpty ? "none registered" : state.goals)"
         toggleItem.title = state.on ? "Turn Off" : "Turn On"
         hotkeyItem.title = "Hotkey: \(hotkeyLabel)"
         autoItem.state = UserDefaults.standard.bool(forKey: kAutoEnable) ? .on : .off

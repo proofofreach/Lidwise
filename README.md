@@ -29,7 +29,8 @@ moment the lid closes.
 
 **The solution:** Closed-Lid Awake pairs `pmset disablesleep` with
 `caffeinate`, puts the controls in your menu bar, and restores normal sleep
-automatically at 20% battery or after six hours.
+automatically at 20% battery, after six hours, or under unsafe thermal pressure.
+A launchd guardian restores sleep if the main guard crashes.
 
 Turn it on. Close the lid. Check the result from another device.
 
@@ -45,7 +46,11 @@ Turn it on. Close the lid. Check the result from another device.
 | **Closed-lid operation** | Keeps local work running after the lid closes |
 | **20% battery floor** | Restores normal sleep before an unattended Mac runs flat |
 | **Six-hour dead-man timer** | Stops a forgotten awake session automatically |
+| **Thermal guard** | Stops immediately at critical pressure or after sustained serious pressure |
+| **Crash recovery** | A separate launchd guardian restores sleep if the session guard disappears |
 | **Wi-Fi recovery** | Gives macOS bounded, backoff-aware chances to rejoin known networks |
+| **Multi-goal monitoring** | Watches several jobs without making any job own the awake window |
+| **Actionable alerts** | Reports battery, thermal, network, stalled, failed, and completed events |
 | **One-click menu control** | Shows power, network, guard, and auto-off state at a glance |
 | **Global hotkey** | Toggles awake mode with `⌃⌥A`, even if the icon is hidden |
 | **Notch recovery** | Detects a menu-bar icon trapped behind a MacBook notch and tries safer positions |
@@ -66,6 +71,34 @@ for unattended use.
 | Hard session limit | No | Optional timer only | **Six hours** |
 | Wi-Fi recovery | No | No | **Bounded watchdog** |
 | Menu-bar status and hotkey | No | No | **Yes** |
+
+### Compared with Amphetamine, KeepingYouAwake, and Lungo
+
+Closed-Lid Awake is not a universal replacement for the established apps. It
+is built for a narrower case: unattended work that must continue with the lid
+closed and no external display attached.
+
+| App | Lid closed without external display | Sessions and automation | Automatic safety | Wi-Fi recovery | Distribution |
+|---|---|---|---|---|---|
+| **Closed-Lid Awake** | **Yes** | Global work window, optional multi-goal telemetry, menu, hotkey, and CLI | **Battery, time, thermal, and crash recovery guards** | **Bounded reconnect watchdog** | GitHub; MIT source |
+| **[Amphetamine](https://apps.apple.com/us/app/amphetamine/id937984704)** | **Yes** | Timed sessions, app/file/device/network/power triggers, hotkeys, and AppleScript | Optional low-battery auto-end | Not advertised | Mac App Store |
+| **[KeepingYouAwake](https://github.com/newmarcel/KeepingYouAwake)** | No | Simple menu-bar sessions for a chosen duration | Avoids closed-lid operation by design | Not advertised | GitHub and Homebrew; MIT source |
+| **[Lungo](https://sindresorhus.com/lungo)** | No, except Apple's charger + external-display clamshell mode | Preset durations, Shortcuts, URL scheme, and third-party CLI | Can deactivate on battery switch or screen lock | Not advertised | Mac App Store and Setapp |
+
+“Not advertised” means the feature is absent from the product's official
+feature documentation; it does not claim that no extension or workaround
+exists. Comparison checked on August 14, 2026.
+
+**Choose Amphetamine** if you want the broadest set of automatic triggers and
+a conventional App Store install. **Choose Lungo** if you want a focused,
+simple App Store utility. **Choose KeepingYouAwake** if you want a small
+open-source wrapper around Apple's `caffeinate` command and can leave the lid
+open.
+
+**Choose Closed-Lid Awake** when closing the lid without an external display is
+the requirement—not an edge case—and you want a fixed safety ceiling, Wi-Fi
+recovery, CLI control, and auditable source. The tradeoff is a privileged
+`pmset` rule and, for the current community build, a manual Gatekeeper approval.
 
 ## Quick start
 
@@ -122,6 +155,7 @@ The installer places:
 ```text
 ~/Applications/Closed-Lid Awake.app
 ~/.local/bin/vibecaf
+~/Library/LaunchAgents/app.closedlidawake.guardian.plist
 ```
 
 It also asks for administrator approval to install a narrow `sudoers` rule.
@@ -132,9 +166,10 @@ The rule allows only:
 /usr/bin/pmset -a disablesleep 1
 ```
 
-That permission lets the battery and time guard restore normal sleep while the
-lid is closed. It does not grant the app a shell or unrestricted administrator
-access. Read the complete [security model](SECURITY.md).
+That permission lets the battery, time, thermal, and crash guards restore
+normal sleep while the lid is closed. It does not grant the app a shell or
+unrestricted administrator access. Read the complete
+[security model](SECURITY.md).
 
 To install without the rule:
 
@@ -143,8 +178,8 @@ To install without the rule:
 ```
 
 > [!WARNING]
-> Without the rule, the unattended guard cannot reliably restore sleep because
-> nobody can answer an administrator prompt behind a closed lid.
+> Without the rule, unattended safety recovery cannot reliably restore sleep
+> because nobody can answer an administrator prompt behind a closed lid.
 
 ### From source
 
@@ -170,30 +205,29 @@ The build creates a universal Intel and Apple Silicon app in `dist/`.
                                ▼
 ┌──────────────────────────────────────────────────────────────┐
 │                         vibecaf                              │
-│        owns the session, PID files, logs, and cleanup        │
-└───────────────┬──────────────────┬──────────────────┬────────┘
-                │                  │                  │
-                ▼                  ▼                  ▼
-       ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
-       │     pmset      │ │   caffeinate   │ │ safety guard   │
-       │ clamshell path │ │ idle-sleep path│ │ 20% · six hours│
-       └────────────────┘ └────────────────┘ └────────────────┘
-                                                    │
-                               ┌────────────────────┘
-                               ▼
-                     ┌──────────────────┐
-                     │ Wi-Fi watchdog  │
-                     │ bounded recovery │
-                     └──────────────────┘
+│         owns the global work window and cleanup              │
+└────────┬──────────────┬──────────────┬──────────────┬─────────┘
+         │              │              │              │
+         ▼              ▼              ▼              ▼
+     pmset +        safety guard   Wi-Fi watchdog   goal registry
+    caffeinate      time · battery  bounded recovery observation only
+                     · thermal
+         ▲
+         │ restores normal sleep if the guard disappears
+   launchd crash guardian
 ```
 
 The helper treats awake mode as one owned session:
 
 1. `pmset disablesleep 1` blocks clamshell sleep.
 2. `caffeinate -i -m -s` blocks idle system and disk sleep.
-3. The guard watches battery level and elapsed time.
-4. The optional watchdog monitors connectivity without reading Wi-Fi passwords.
-5. Turning off always attempts `pmset disablesleep 0`, even if another state
+3. The guard watches battery, elapsed time, and macOS thermal pressure.
+4. An independent launchd guardian restores sleep after a guard crash or stale
+   session heartbeat.
+5. The optional watchdog monitors connectivity without reading Wi-Fi passwords.
+6. The optional goal registry observes jobs but never starts or stops the work
+   window.
+7. Turning off always attempts `pmset disablesleep 0`, even if another state
    check fails.
 
 The helper tracks only processes it starts. It does not kill unrelated
@@ -212,6 +246,28 @@ vibecaf status --net  # Status with a live network probe
 vibecaf netlog        # Show recent watchdog activity
 ```
 
+### Monitor several jobs
+
+Goal monitoring is optional telemetry. Awake mode remains under your control.
+A completion, failure, stall, or stopped process never turns awake mode off.
+
+```bash
+vibecaf goal add "API migration" --pid 12345
+vibecaf goal add "Docs agent" --activity-file /tmp/docs-progress --stale-after 600
+vibecaf goals --refresh
+vibecaf goal complete "API migration" "merged"
+vibecaf goal fail "Docs agent" "lost connection"
+```
+
+If you restart a stopped job, attach the same goal to its replacement PID:
+
+```bash
+vibecaf goal restart "API migration" --pid 23456
+```
+
+Use `goal touch`, `goal remove`, or `goals --summary` to update and manage the
+registry. None of these commands changes system sleep state.
+
 Example status:
 
 ```text
@@ -220,8 +276,11 @@ Lid-close sleep blocked: yes
 caffeinate pid: 12345
 Wi-Fi watchdog pid: 12346
 Guard pid: 12347
+Crash guardian: running
 Auto-off in: 5h 42m
 Battery floor: 20%
+Thermal: nominal
+Goals: 4 active · 1 stalled · 2 completed · 0 failed
 Network: online
 Power: AC 100%
 ```
@@ -234,6 +293,9 @@ Closed-Lid Awake reduces risk; it cannot eliminate it.
 |---|---:|---|
 | Battery floor | 20% | Restores sleep before battery exhaustion |
 | Dead-man timer | 6 hours | Ends forgotten sessions |
+| Critical thermal pressure | Immediate | Restores sleep at the highest macOS thermal state |
+| Serious thermal pressure | 3 checks | Avoids reacting to one brief spike |
+| Guard heartbeat | 3 minutes | Recovers from a crashed or frozen session guard |
 | Network recovery limit | 3 failed cycles | Stops Wi-Fi thrashing |
 | Passive retry window | 15 minutes | Gives macOS time to recover on its own |
 | Display assertion | Disabled | Allows the display and lock screen to behave normally |
@@ -264,6 +326,22 @@ credentials. Disable the watchdog for one session with:
 ```bash
 VIBECAF_NO_NETWATCH=1 vibecaf on
 ```
+
+## Notifications
+
+The app sends local notifications for safety shutdowns, network transitions,
+and goal stalls, stops, failures, recoveries, and completions.
+
+For alerts on another device, set an [ntfy](https://ntfy.sh/) topic URL before
+starting awake mode:
+
+```bash
+VIBECAF_NTFY_URL="https://ntfy.sh/a-long-private-topic-name" vibecaf on
+```
+
+Anyone who knows a public ntfy topic can receive its messages. Use a long,
+unguessable topic or a private self-hosted server. Goal names and messages are
+sent to that URL when remote alerts are enabled.
 
 ## Settings
 
@@ -351,7 +429,8 @@ sudo pmset -a disablesleep 0
 
 - **macOS only.** The app depends on AppKit, `pmset`, and `caffeinate`.
 - **No reboot persistence.** macOS clears `disablesleep` during a reboot.
-- **No heat guarantee.** The guard measures time and battery, not temperature.
+- **No heat guarantee.** The guard reacts to macOS thermal-pressure states. It
+  cannot measure enclosure airflow or make closed-bag use safe.
 - **No network guarantee.** Wi-Fi, VPNs, captive portals, routers, and remote
   services can still fail.
 - **No power-loss protection.** A drained battery, unplugged charger, kernel
@@ -375,9 +454,9 @@ It is deliberately narrow. Your account may run only the two fixed
 
 ### Will it cook my Mac?
 
-It can create unsafe conditions if you block airflow. The battery floor and
-timer help, but they do not measure temperature. Keep the Mac uncovered on a
-hard surface. Never run it inside a bag.
+It can create unsafe conditions if you block airflow. The thermal guard reacts
+to system pressure, but it cannot make an enclosed Mac safe. Keep the Mac
+uncovered on a hard surface. Never run it inside a bag.
 
 ### Does it work on Intel Macs?
 
