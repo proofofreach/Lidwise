@@ -1,6 +1,14 @@
 # Changelog
 
-## 1.1.0 — unreleased
+## 1.2.0 — unreleased
+
+- Added automatic, local-only Claude Code and Codex session discovery.
+- Added agent activity and restart notifications without giving agents control
+  of the global work window.
+- Rebuilt the menu around a compact work-window and session-fleet card.
+- Added `vibecaf agents` commands for per-session and aggregate status.
+
+## 1.1.0 — 2026-08-14
 
 - Added an independent launchd guardian for crash-safe sleep restoration.
 - Added thermal-pressure shutdown at critical or sustained serious pressure.

@@ -1,0 +1,87 @@
+#!/bin/bash
+# Discover recent Claude Code and Codex sessions without making them owners of
+# the global awake window. Output: provider<TAB>session<TAB>state<TAB>age.
+
+set -u
+
+NOW=${VIBECAF_AGENT_NOW:-$(date +%s)}
+ACTIVE_WITHIN=${VIBECAF_AGENT_ACTIVE_WITHIN:-90}
+RECENT_WITHIN=${VIBECAF_AGENT_RECENT_WITHIN:-1800}
+IDLE_WITHIN=${VIBECAF_AGENT_IDLE_WITHIN:-600}
+RECENT_MINUTES=$((RECENT_WITHIN / 60 + 1))
+CLAUDE_ROOT=${VIBECAF_CLAUDE_SESSIONS:-"$HOME/.claude/projects"}
+CODEX_ROOT=${VIBECAF_CODEX_SESSIONS:-"$HOME/.codex/sessions"}
+
+if [ -n "${VIBECAF_AGENT_PROCESS_FILE:-}" ]; then
+  PROCESS_SNAPSHOT=$(sed -n '1,10000p' "$VIBECAF_AGENT_PROCESS_FILE" 2>/dev/null || true)
+else
+  PROCESS_SNAPSHOT=$(ps -x -o pid=,ppid=,command= 2>/dev/null || true)
+fi
+
+connected() {
+  case "$1" in
+    claude)
+      printf '%s\n' "$PROCESS_SNAPSHOT" \
+        | grep -Eiq '(^|[ /])claude([[:space:]]|$)' ;;
+    codex)
+      printf '%s\n' "$PROCESS_SNAPSHOT" \
+        | grep -Eiq '(^|[ /])codex([[:space:]]|$)|Codex\.app|/Codex \(' ;;
+  esac
+}
+
+file_age() {
+  local modified age
+  modified=$(stat -f %m "$1" 2>/dev/null || echo 0)
+  case "$modified" in ""|*[!0-9]*) modified=0 ;; esac
+  age=$((NOW - modified))
+  [ "$age" -lt 0 ] && age=0
+  printf '%s\n' "$age"
+}
+
+codex_marker() {
+  tail -100 "$1" 2>/dev/null | awk '
+    /"type":"task_complete"/ { state="completed" }
+    /"type":"(user_message|agent_reasoning|agent_message|function_call|custom_tool_call)"/ { state="active" }
+    END { print state }
+  '
+}
+
+scan_provider() {  # scan_provider <provider> <root>
+  local provider=$1 root=$2 file age state session found=0 is_connected=0 marker
+  connected "$provider" && is_connected=1
+
+  if [ -d "$root" ]; then
+    while IFS= read -r file; do
+      [ -f "$file" ] || continue
+      age=$(file_age "$file")
+      [ "$age" -le "$RECENT_WITHIN" ] || continue
+      session=$(basename "$file" .jsonl)
+      case "$session" in *$'\t'*|*$'\n'*) continue ;; esac
+
+      if [ "$provider" = "codex" ]; then
+        marker=$(codex_marker "$file")
+      else
+        marker=""
+      fi
+
+      if [ "$marker" = "completed" ]; then
+        state=completed
+      elif [ "$age" -le "$ACTIVE_WITHIN" ]; then
+        state=active
+      elif [ "$age" -le "$IDLE_WITHIN" ]; then
+        state=idle
+      else
+        state=completed
+      fi
+      found=1
+      printf '%s\t%s\t%s\t%s\n' "$provider" "$session" "$state" "$age"
+    done < <(find "$root" -type f -name '*.jsonl' -mmin "-$RECENT_MINUTES" -print 2>/dev/null | sort)
+  fi
+
+  if [ "$found" -eq 0 ] && [ "$is_connected" -eq 1 ]; then
+    printf '%s\t%s\tidle\t0\n' "$provider" "$provider"
+  fi
+}
+
+scan_provider claude "$CLAUDE_ROOT"
+scan_provider codex "$CODEX_ROOT"

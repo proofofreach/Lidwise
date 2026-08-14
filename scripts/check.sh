@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 APP="$ROOT/dist/Closed-Lid Awake.app"
 
-/bin/bash -n "$ROOT/bin/vibecaf"
+for script in "$ROOT"/bin/vibecaf*; do /bin/bash -n "$script"; done
 for script in "$ROOT"/scripts/*.sh; do /bin/bash -n "$script"; done
 for test_script in "$ROOT"/tests/*.sh; do /bin/bash -n "$test_script"; done
 for test_script in "$ROOT"/tests/*.sh; do "$test_script"; done

@@ -1,6 +1,7 @@
 // Closed-Lid Awake — menu bar control for ~/.local/bin/vibecaf
 import AppKit
 import Carbon.HIToolbox
+import SwiftUI
 
 let bundledVibecafPath = Bundle.main.url(forResource: "vibecaf", withExtension: nil)?.path
 let vibecafPath = bundledVibecafPath
@@ -23,6 +24,20 @@ func vibecaf(_ args: String...) -> String {
     return String(data: data, encoding: .utf8) ?? ""
 }
 
+struct AgentCounts {
+    var active = 0
+    var idle = 0
+    var completed = 0
+
+    var detail: String {
+        var parts: [String] = []
+        if active > 0 { parts.append("\(active) active") }
+        if idle > 0 { parts.append("\(idle) idle") }
+        if completed > 0 { parts.append("\(completed) done") }
+        return parts.isEmpty ? "Not detected" : parts.joined(separator: " · ")
+    }
+}
+
 struct State {
     var on = false
     var power = ""
@@ -36,6 +51,14 @@ struct State {
     var floor = ""
     var thermal = ""
     var goals = ""
+    var claude = AgentCounts()
+    var codex = AgentCounts()
+}
+
+func agentCounts(from line: Substring) -> AgentCounts {
+    let numbers = line.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }
+    guard numbers.count >= 3 else { return AgentCounts() }
+    return AgentCounts(active: numbers[0], idle: numbers[1], completed: numbers[2])
 }
 
 // `probeNet: false` is the cheap path — pmset and pidfiles only, and the
@@ -61,8 +84,169 @@ func readState(probeNet: Bool = false) -> State {
         if line.hasPrefix("Battery floor:") { s.floor = line.replacingOccurrences(of: "Battery floor: ", with: "") }
         if line.hasPrefix("Thermal:") { s.thermal = line.replacingOccurrences(of: "Thermal: ", with: "") }
         if line.hasPrefix("Goals:") { s.goals = line.replacingOccurrences(of: "Goals: ", with: "") }
+        if line.hasPrefix("Claude Code:") { s.claude = agentCounts(from: line) }
+        if line.hasPrefix("Codex:") { s.codex = agentCounts(from: line) }
     }
     return s
+}
+
+private struct WorkWindowCard: View {
+    let state: State
+    let onToggle: () -> Void
+
+    private let canvas = Color(red: 0.055, green: 0.067, blue: 0.12)
+    private let bay = Color(red: 0.075, green: 0.09, blue: 0.16)
+    private let rail = Color(red: 0.065, green: 0.078, blue: 0.135)
+    private let line = Color.white.opacity(0.11)
+    private let primary = Color(red: 0.92, green: 0.94, blue: 1.0)
+    private let secondary = Color(red: 0.62, green: 0.66, blue: 0.82)
+    private let accent = Color(red: 0.39, green: 0.55, blue: 1.0)
+    private let mint = Color(red: 0.39, green: 0.85, blue: 0.69)
+    private let amber = Color(red: 0.95, green: 0.69, blue: 0.32)
+    private let coral = Color(red: 1.0, green: 0.46, blue: 0.48)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Work window")
+                        .font(.system(size: 19, weight: .bold))
+                        .foregroundStyle(primary)
+                    Text(windowDetail)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(state.on ? mint : secondary)
+                }
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { state.on },
+                    set: { value in if value != state.on { onToggle() } }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(accent)
+                .accessibilityLabel("Work window")
+            }
+
+            HStack(spacing: 10) {
+                providerBay("Claude Code", counts: state.claude)
+                providerBay("Codex", counts: state.codex)
+            }
+
+            HStack(spacing: 7) {
+                Image(systemName: "flag.fill")
+                Text("Goals")
+                    .fontWeight(.semibold)
+                Spacer()
+                Text(state.goals.isEmpty ? "None registered" : state.goals)
+                    .lineLimit(1)
+                    .monospacedDigit()
+            }
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(secondary)
+
+            HStack(spacing: 14) {
+                safetyItem("bolt.fill", powerDetail)
+                safetyItem("thermometer.medium", state.thermal.isEmpty ? "thermal unknown" : state.thermal)
+                safetyItem(state.netOK ? "wifi" : "wifi.slash", networkDetail)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(rail))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(line, lineWidth: 1))
+
+            HStack(spacing: 7) {
+                Image(systemName: "eye")
+                Text("Observed only — agents never control sleep")
+                    .foregroundStyle(secondary)
+                Spacer()
+                Image(systemName: protectionSymbol)
+                    .foregroundStyle(protectionColor)
+                Text(protectionLabel)
+                    .foregroundStyle(protectionColor)
+            }
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(secondary)
+        }
+        .padding(18)
+        .frame(width: 408)
+        .background(RoundedRectangle(cornerRadius: 18).fill(canvas))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(line, lineWidth: 1))
+        .padding(.vertical, 6)
+    }
+
+    private var windowDetail: String {
+        guard state.on else { return "Off · closing the lid sleeps this Mac" }
+        if !state.autoOff.isEmpty && state.autoOff != "n/a" {
+            return "On · auto-off in \(state.autoOff)"
+        }
+        return "On · lid can stay closed"
+    }
+
+    private var protectionOK: Bool {
+        !state.on || (state.guarded && state.guardian == "running")
+    }
+
+    private var protectionLabel: String {
+        if !state.on { return "Manual" }
+        return protectionOK ? "Protected" : "Guard fault"
+    }
+
+    private var protectionSymbol: String {
+        if !state.on { return "hand.raised.fill" }
+        return protectionOK ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
+    }
+
+    private var protectionColor: Color {
+        protectionOK ? secondary : coral
+    }
+
+    private var powerDetail: String {
+        guard !state.power.isEmpty else { return "Power unknown" }
+        if state.on && state.onBattery && !state.floor.isEmpty {
+            return "\(state.power) · floor \(state.floor)"
+        }
+        return state.power
+    }
+
+    private var networkDetail: String {
+        guard !state.net.isEmpty else { return "network unknown" }
+        if state.on && state.watchdog { return "\(state.net) · recovery" }
+        return state.net
+    }
+
+    private func providerBay(_ name: String, counts: AgentCounts) -> some View {
+        HStack(spacing: 9) {
+            Circle()
+                .fill(counts.active > 0 ? mint : counts.idle > 0 ? amber : secondary.opacity(0.6))
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(primary)
+                Text(counts.detail)
+                    .font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                    .foregroundStyle(counts.active > 0 ? mint : secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 58)
+        .background(RoundedRectangle(cornerRadius: 11).fill(bay))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(line, lineWidth: 1))
+    }
+
+    private func safetyItem(_ symbol: String, _ text: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: symbol)
+            Text(text)
+                .lineLimit(1)
+        }
+        .font(.system(size: 10.5, weight: .medium))
+        .foregroundStyle(secondary)
+    }
 }
 
 let placementLogPath = NSString(string: "~/Library/Logs/closedlidawake.log").expandingTildeInPath
@@ -120,10 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // worked would be forgotten by the next login. Keep our own copy.
     static let lastGoodKey = "LastGoodPreferredPosition"
 
-    let headerItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    let powerItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    let netItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    let goalsItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    let cardItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let netLogItem = NSMenuItem(title: "Open Wi-Fi watchdog log", action: #selector(openNetLog), keyEquivalent: "")
     let toggleItem = NSMenuItem(title: "", action: #selector(toggle), keyEquivalent: "a")
     let hotkeyItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -133,11 +314,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         menu.delegate = self
-        for i in [headerItem, powerItem, netItem, goalsItem, hotkeyItem] { i.isEnabled = false }
-        menu.addItem(headerItem)
-        menu.addItem(powerItem)
-        menu.addItem(netItem)
-        menu.addItem(goalsItem)
+        hotkeyItem.isEnabled = false
+        menu.addItem(cardItem)
         menu.addItem(.separator())
         menu.addItem(toggleItem)
         menu.addItem(hotkeyItem)
@@ -334,34 +512,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applyState() {
         item.button?.image = currentImage()
         item.button?.toolTip = state.on ? "Awake mode ON — lid can stay closed" : "Awake mode off — closing the lid sleeps this Mac"
+        updateStatusCard()
 
         placementItem.title = iconHidden
             ? "⚠︎ Icon is behind the notch — try to move it"
             : "Move icon out of the notch"
 
-        if state.on {
-            // The dead-man deadline is the single most useful thing to show while
-            // it's running: it answers "did I leave this on?" without a terminal.
-            headerItem.title = state.autoOff.isEmpty || state.autoOff == "n/a"
-                ? "Awake mode: ON — lid can stay closed"
-                : "Awake mode: ON — auto-off in \(state.autoOff)"
-        } else {
-            headerItem.title = "Awake mode: OFF"
-        }
-        // On battery the guard is the reason this is a warning and not a threat.
-        let thermal = state.thermal.isEmpty ? "" : " · thermal \(state.thermal)"
-        powerItem.title = (state.on && state.onBattery
-            ? "\(state.power)  ⚠︎ draining — auto-off at \(state.floor.isEmpty ? "the battery floor" : state.floor)"
-            : state.power) + thermal
-        let wd = state.watchdog ? "watchdog on" : "watchdog off"
-        let gd = state.guarded ? "guard on" : "⚠︎ guard off"
-        let recovery = state.guardian == "running" ? "recovery on" : "⚠︎ recovery \(state.guardian.isEmpty ? "unknown" : state.guardian)"
-        netItem.title = "Network: \(state.net)\(state.on ? " · \(wd) · \(gd) · \(recovery)" : "")"
-        goalsItem.title = "Goals: \(state.goals.isEmpty ? "none registered" : state.goals)"
-        toggleItem.title = state.on ? "Turn Off" : "Turn On"
+        toggleItem.title = state.on ? "Turn Off Work Window" : "Turn On Work Window"
         hotkeyItem.title = "Hotkey: \(hotkeyLabel)"
         autoItem.state = UserDefaults.standard.bool(forKey: kAutoEnable) ? .on : .off
         loginItem.state = FileManager.default.fileExists(atPath: agentPlist) ? .on : .off
+    }
+
+    func updateStatusCard() {
+        let view = WorkWindowCard(state: state) { [weak self] in self?.toggle() }
+            .environment(\.colorScheme, .dark)
+        let host = NSHostingView(rootView: view)
+        host.frame = NSRect(x: 0, y: 0, width: 408, height: 282)
+        cardItem.view = host
     }
 
     @objc func toggle() {
@@ -535,8 +703,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
+#if CARD_PREVIEW
+let previewApp = NSApplication.shared
+previewApp.setActivationPolicy(.regular)
+let previewState = State(
+    on: true,
+    power: "AC 100%",
+    net: "online",
+    netOK: true,
+    guarded: true,
+    guardian: "running",
+    autoOff: "5h 42m",
+    floor: "20%",
+    thermal: "nominal",
+    goals: "4 active · 1 stalled",
+    claude: AgentCounts(active: 2, idle: 1, completed: 0),
+    codex: AgentCounts(active: 3, idle: 0, completed: 1)
+)
+private let previewHost = NSHostingView(
+    rootView: WorkWindowCard(state: previewState, onToggle: {})
+        .environment(\.colorScheme, .dark)
+)
+previewHost.frame = NSRect(x: 0, y: 0, width: 432, height: 318)
+previewHost.layoutSubtreeIfNeeded()
+if let output = ProcessInfo.processInfo.environment["VIBECAF_CARD_PREVIEW_PATH"],
+   let bitmap = previewHost.bitmapImageRepForCachingDisplay(in: previewHost.bounds) {
+    previewHost.cacheDisplay(in: previewHost.bounds, to: bitmap)
+    try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: output))
+} else {
+    let previewWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 432, height: 282),
+        styleMask: [.titled, .closable],
+        backing: .buffered,
+        defer: false
+    )
+    previewWindow.title = "Work Window Card Preview"
+    previewWindow.contentView = previewHost
+    previewWindow.center()
+    previewWindow.makeKeyAndOrderFront(nil)
+    previewApp.activate(ignoringOtherApps: true)
+    previewApp.run()
+}
+#else
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
 app.run()
+#endif

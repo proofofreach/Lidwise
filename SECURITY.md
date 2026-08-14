@@ -37,14 +37,29 @@ internet access. If that fails, it pings the local default gateway. After
 repeated link failures, it can power-cycle Wi-Fi with `networksetup` so macOS
 retries known networks. It does not read or store Wi-Fi credentials.
 
+## Agent observation
+
+Automatic Claude Code and Codex status is best-effort, local observation.
+The scanner reads process command lines, session-log filenames and modification
+times, and the last 100 log records to identify activity and completion event
+types. It processes those records locally but does not persist, display, or
+transmit prompts, responses, or tool arguments. Agent state can never start or
+stop the global work window.
+
+If `VIBECAF_NTFY_URL` is set, agent notifications contain only the provider and
+state transition, such as `Codex session completed`. Session IDs and transcript
+content are not sent.
+
 ## Local files
 
-Runtime PID and network-state files use `/tmp/vibecaf-*.<uid>`. Durable session
-and goal records are stored under:
+Runtime PID, network-state, and agent-summary files use `/tmp/vibecaf-*.<uid>`.
+Durable session, goal, and observed-agent records are stored under:
 
 ```text
 ~/Library/Application Support/Closed-Lid Awake/
 ```
+
+Agent summary and observed-agent records are readable only by the current user.
 
 The app installs an unprivileged crash-recovery LaunchAgent at:
 
@@ -60,9 +75,9 @@ Logs are written to:
 ~/Library/Logs/closedlidawake-guardian.log
 ```
 
-No telemetry is collected. If `VIBECAF_NTFY_URL` is set, notification titles,
-goal names, and messages are sent to that user-selected endpoint. Public ntfy
-topics must be treated as shared secrets.
+No analytics or project telemetry is collected. If `VIBECAF_NTFY_URL` is set,
+notification titles, goal names, and messages are sent to that user-selected
+endpoint. Public ntfy topics must be treated as shared secrets.
 
 ## Reporting a vulnerability
 

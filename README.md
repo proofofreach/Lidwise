@@ -50,11 +50,12 @@ Turn it on. Close the lid. Check the result from another device.
 | **Crash recovery** | A separate launchd guardian restores sleep if the session guard disappears |
 | **Wi-Fi recovery** | Gives macOS bounded, backoff-aware chances to rejoin known networks |
 | **Multi-goal monitoring** | Watches several jobs without making any job own the awake window |
+| **Automatic agent fleet** | Shows active, idle, and recently completed Claude Code and Codex sessions |
 | **Actionable alerts** | Reports battery, thermal, network, stalled, failed, and completed events |
-| **One-click menu control** | Shows power, network, guard, and auto-off state at a glance |
+| **One-click menu control** | Shows the work window, agent fleet, safety rail, and auto-off state at a glance |
 | **Global hotkey** | Toggles awake mode with `⌃⌥A`, even if the icon is hidden |
 | **Notch recovery** | Detects a menu-bar icon trapped behind a MacBook notch and tries safer positions |
-| **No telemetry** | Sends no analytics, accounts, or usage data to the project |
+| **No analytics** | Sends no analytics, accounts, or usage data to the project |
 
 ## Why not just use `caffeinate`?
 
@@ -72,16 +73,17 @@ for unattended use.
 | Wi-Fi recovery | No | No | **Bounded watchdog** |
 | Menu-bar status and hotkey | No | No | **Yes** |
 
-### Compared with Amphetamine, KeepingYouAwake, and Lungo
+### Compared with Lidless, Amphetamine, KeepingYouAwake, and Lungo
 
 Closed-Lid Awake is not a universal replacement for the established apps. It
 is built for a narrower case: unattended work that must continue with the lid
 closed and no external display attached.
 
-| App | Lid closed without external display | Sessions and automation | Automatic safety | Wi-Fi recovery | Distribution |
+| App | Lid closed without external display | Agent model | Automatic safety | Wi-Fi recovery | Distribution |
 |---|---|---|---|---|---|
-| **Closed-Lid Awake** | **Yes** | Global work window, optional multi-goal telemetry, menu, hotkey, and CLI | **Battery, time, thermal, and crash recovery guards** | **Bounded reconnect watchdog** | GitHub; MIT source |
-| **[Amphetamine](https://apps.apple.com/us/app/amphetamine/id937984704)** | **Yes** | Timed sessions, app/file/device/network/power triggers, hotkeys, and AppleScript | Optional low-battery auto-end | Not advertised | Mac App Store |
+| **Closed-Lid Awake** | **Yes** | **Manual work window; Claude/Codex fleet is observed but never owns sleep** | **Battery, time, thermal, and crash recovery guards** | **Bounded reconnect watchdog** | GitHub; MIT source |
+| **[Lidless](https://github.com/nghialuong/Lidless)** | **Yes** | Manual toggle; its current UI also shows an optional agent-aware mode | Battery, charging, time, thermal, and crash recovery guards | Not advertised | Signed, notarized GitHub release; MIT source |
+| **[Amphetamine](https://apps.apple.com/us/app/amphetamine/id937984704)** | **Yes** | Timed sessions plus app/file/device/network/power triggers | Optional low-battery auto-end | Not advertised | Mac App Store |
 | **[KeepingYouAwake](https://github.com/newmarcel/KeepingYouAwake)** | No | Simple menu-bar sessions for a chosen duration | Avoids closed-lid operation by design | Not advertised | GitHub and Homebrew; MIT source |
 | **[Lungo](https://sindresorhus.com/lungo)** | No, except Apple's charger + external-display clamshell mode | Preset durations, Shortcuts, URL scheme, and third-party CLI | Can deactivate on battery switch or screen lock | Not advertised | Mac App Store and Setapp |
 
@@ -89,30 +91,37 @@ closed and no external display attached.
 feature documentation; it does not claim that no extension or workaround
 exists. Comparison checked on August 14, 2026.
 
-**Choose Amphetamine** if you want the broadest set of automatic triggers and
+Lidless's agent-aware behavior is based on its current app UI. Its public
+README does not yet document that mode.
+
+**Choose Lidless** if you want a polished, notarized install and want agent
+activity to control whether the Mac stays awake. **Choose Amphetamine** if you
+want the broadest set of automatic triggers and
 a conventional App Store install. **Choose Lungo** if you want a focused,
 simple App Store utility. **Choose KeepingYouAwake** if you want a small
 open-source wrapper around Apple's `caffeinate` command and can leave the lid
 open.
 
-**Choose Closed-Lid Awake** when closing the lid without an external display is
-the requirement—not an edge case—and you want a fixed safety ceiling, Wi-Fi
-recovery, CLI control, and auditable source. The tradeoff is a privileged
-`pmset` rule and, for the current community build, a manual Gatekeeper approval.
+**Choose Closed-Lid Awake** when you may have several goals in flight, want to
+restart one later, and do not want a momentary agent state to end the global
+work window. It observes the fleet, while the manual work window remains the
+authority. You also get a fixed safety ceiling, Wi-Fi recovery, CLI control,
+and auditable source. The tradeoff is a privileged `pmset` rule and, for the
+current community build, a manual Gatekeeper approval.
 
 ## Quick start
 
 ```text
 1. Install Closed-Lid Awake
 2. Open it from ~/Applications
-3. Click the moon icon and choose “Turn On”
-4. Confirm that the menu reports “Awake mode: ON”
+3. Click the moon icon and choose “Turn On Work Window”
+4. Confirm that the work-window switch is on
 5. Leave the Mac on a hard, ventilated surface
 6. Close the lid
 ```
 
-The cup icon means awake mode is active. The app reports the current power
-source, network state, guard state, and remaining time.
+The cup icon means the work window is active. The app reports agent activity,
+power, network, thermal, protection, and remaining time.
 
 You can also press `⌃⌥A` anywhere or run:
 
@@ -206,12 +215,12 @@ The build creates a universal Intel and Apple Silicon app in `dist/`.
 ┌──────────────────────────────────────────────────────────────┐
 │                         vibecaf                              │
 │         owns the global work window and cleanup              │
-└────────┬──────────────┬──────────────┬──────────────┬─────────┘
-         │              │              │              │
-         ▼              ▼              ▼              ▼
-     pmset +        safety guard   Wi-Fi watchdog   goal registry
-    caffeinate      time · battery  bounded recovery observation only
-                     · thermal
+└──────┬───────────┬──────────────┬──────────────┬──────────────┘
+       │           │              │              │
+       ▼           ▼              ▼              ▼
+   pmset +     safety guard  Wi-Fi watchdog  observation layer
+  caffeinate   time · battery bounded recovery goals · Claude · Codex
+                · thermal                      never owns sleep
          ▲
          │ restores normal sleep if the guard disappears
    launchd crash guardian
@@ -225,8 +234,8 @@ The helper treats awake mode as one owned session:
 4. An independent launchd guardian restores sleep after a guard crash or stale
    session heartbeat.
 5. The optional watchdog monitors connectivity without reading Wi-Fi passwords.
-6. The optional goal registry observes jobs but never starts or stops the work
-   window.
+6. The goal registry and automatic agent scanner observe work but never start
+   or stop the work window.
 7. Turning off always attempts `pmset disablesleep 0`, even if another state
    check fails.
 
@@ -244,7 +253,24 @@ vibecaf toggle        # Switch state
 vibecaf status        # Fast local status
 vibecaf status --net  # Status with a live network probe
 vibecaf netlog        # Show recent watchdog activity
+vibecaf agents        # List detected Claude Code and Codex sessions
+vibecaf agents --summary
 ```
+
+### Observe Claude Code and Codex automatically
+
+The app discovers local Claude Code and Codex sessions and summarizes them as
+active, idle, or recently completed. It can notify you when a session resumes,
+goes idle, completes, or restarts after completion.
+
+This is deliberately observation, not automation. Starting, idling, completing,
+or restarting an agent never turns the work window on or off. That separation
+supports several concurrent goals and lets you restart a job after its agent
+has stopped.
+
+Detection is best-effort. It uses local process state and recent session-log
+event metadata. It does not show or transmit transcript content. See the
+[security model](SECURITY.md).
 
 ### Monitor several jobs
 
@@ -281,6 +307,9 @@ Auto-off in: 5h 42m
 Battery floor: 20%
 Thermal: nominal
 Goals: 4 active · 1 stalled · 2 completed · 0 failed
+Claude Code: 2 active · 1 idle · 0 completed
+Codex: 3 active · 0 idle · 1 completed
+All agents: 5 active · 1 idle · 1 completed
 Network: online
 Power: AC 100%
 ```
@@ -330,7 +359,8 @@ VIBECAF_NO_NETWATCH=1 vibecaf on
 ## Notifications
 
 The app sends local notifications for safety shutdowns, network transitions,
-and goal stalls, stops, failures, recoveries, and completions.
+agent transitions, and goal stalls, stops, failures, recoveries, and
+completions.
 
 For alerts on another device, set an [ntfy](https://ntfy.sh/) topic URL before
 starting awake mode:
@@ -465,8 +495,9 @@ needs release testing before version 1.0 is published.
 
 ### Does it collect data?
 
-No telemetry or analytics. The optional network watchdog contacts Apple's
-captive-portal test page and your local gateway. See [SECURITY.md](SECURITY.md).
+No analytics or project telemetry. Agent observation stays local. The optional
+network watchdog contacts Apple's captive-portal test page and your local
+gateway. See [SECURITY.md](SECURITY.md).
 
 ### Can it keep Claude, Codex, a build, or a transfer running?
 

@@ -50,6 +50,7 @@ else
 fi
 
 install -m 0755 "$ROOT/bin/vibecaf" "$RESOURCES/vibecaf"
+install -m 0755 "$ROOT/bin/vibecaf-agent-scan" "$RESOURCES/vibecaf-agent-scan"
 chmod 0755 "$RESOURCES/vibecaf-thermal"
 
 xcrun swiftc "$ROOT/src/makeicon.swift" -o "$BUILD_DIR/makeicon"

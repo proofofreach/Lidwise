@@ -18,10 +18,12 @@ OSASCRIPT=${VIBECAF_OSASCRIPT:-/usr/bin/osascript}
 SUDO=${VIBECAF_SUDO:-/usr/bin/sudo}
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 THERMAL_STATE_CMD=${VIBECAF_THERMAL_STATE_CMD:-"$(dirname "$SELF")/vibecaf-thermal"}
+AGENT_SCAN_CMD=${VIBECAF_AGENT_SCAN_CMD:-"$(dirname "$SELF")/vibecaf-agent-scan"}
 
 RUNTIME_DIR=${VIBECAF_RUNTIME_DIR:-/tmp}
 STATE_DIR=${VIBECAF_STATE_DIR:-"$HOME/Library/Application Support/Closed-Lid Awake"}
 GOALS_DIR="$STATE_DIR/goals"
+AGENTS_DIR="$STATE_DIR/agents"
 SESSION_DIR="$STATE_DIR/session"
 
 PIDFILE="$RUNTIME_DIR/vibecaf.$(id -u).pid"
@@ -31,6 +33,9 @@ STARTFILE="$SESSION_DIR/started"
 # The watchdog's latest verdict, so `status` can report the network without
 # running its own probe. See net_state / cheap_net.
 NETSTATEFILE="$RUNTIME_DIR/vibecaf-net-state.$(id -u)"
+AGENT_RUNTIME_DIR="$RUNTIME_DIR/vibecaf-agent-state.$(id -u)"
+AGENTSTATEFILE="$AGENT_RUNTIME_DIR/sessions.tsv"
+AGENT_CACHE_MAX_AGE=${VIBECAF_AGENT_CACHE_MAX_AGE:-120}
 NETLOG="$HOME/Library/Logs/vibecaf-net.log"
 
 # -i idle system sleep, -m disk idle sleep, -s system sleep while on AC.
@@ -379,6 +384,112 @@ goal_command() {
   esac
 }
 
+# ── automatic agent observation ─────────────────────────────────────────────
+#
+# Claude Code and Codex sessions are discovered from their local activity logs
+# and running processes. This registry is telemetry only: no function in this
+# section calls turn_on or turn_off.
+
+agent_provider_name() {
+  case "$1" in claude) echo "Claude Code" ;; codex) echo "Codex" ;; *) echo "$1" ;; esac
+}
+
+agent_record_dir() {
+  local key
+  key=$(printf '%s:%s' "$1" "$2" | /usr/bin/shasum -a 256 | awk '{print substr($1,1,16)}')
+  printf '%s/%s\n' "$AGENTS_DIR" "$key"
+}
+
+agents_prepare_runtime() {
+  mkdir -p "$RUNTIME_DIR" || return 1
+  [ ! -L "$AGENT_RUNTIME_DIR" ] || return 1
+  if [ ! -d "$AGENT_RUNTIME_DIR" ]; then
+    mkdir -m 700 "$AGENT_RUNTIME_DIR" || return 1
+  fi
+  chmod 700 "$AGENT_RUNTIME_DIR" || return 1
+}
+
+agents_refresh() {
+  local tmp provider session state age dir previous display title body
+  agents_prepare_runtime || return 1
+  [ -x "$AGENT_SCAN_CMD" ] || { rm -f "$AGENTSTATEFILE"; return 1; }
+  mkdir -p "$AGENTS_DIR"
+  chmod 700 "$AGENTS_DIR" 2>/dev/null || true
+  tmp=$(/usr/bin/mktemp "$AGENTSTATEFILE.XXXXXX") || return 1
+  chmod 600 "$tmp"
+  if ! "$AGENT_SCAN_CMD" > "$tmp"; then
+    rm -f "$tmp" "$AGENTSTATEFILE"
+    return 1
+  fi
+
+  while IFS=$'\t' read -r provider session state age; do
+    case "$provider:$state" in
+      claude:active|claude:idle|claude:completed|codex:active|codex:idle|codex:completed) ;;
+      *) continue ;;
+    esac
+    [ -n "$session" ] || continue
+    dir=$(agent_record_dir "$provider" "$session")
+    previous=$(read_field "$dir" state unknown)
+    write_field "$dir" provider "$provider"
+    write_field "$dir" session "$session"
+    write_field "$dir" state "$state"
+    write_field "$dir" age "$age"
+
+    [ "$previous" = "unknown" ] && continue
+    [ "$previous" = "$state" ] && continue
+    display=$(agent_provider_name "$provider")
+    case "$state:$previous" in
+      active:completed) title="Agent active"; body="$display session restarted" ;;
+      active:*) title="Agent active"; body="$display session resumed" ;;
+      idle:*) title="Agent idle"; body="$display session went idle" ;;
+      completed:*) title="Agent completed"; body="$display session completed" ;;
+    esac
+    notify_event "$title" "$body"
+  done < "$tmp"
+
+  chmod -R go-rwx "$AGENTS_DIR" 2>/dev/null || true
+  mv "$tmp" "$AGENTSTATEFILE"
+}
+
+agents_ensure_cache() {
+  local modified now age
+  agents_prepare_runtime || return 1
+  if [ -f "$AGENTSTATEFILE" ]; then
+    modified=$(stat -f %m "$AGENTSTATEFILE" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    age=$((now - modified))
+    [ "$age" -le "$AGENT_CACHE_MAX_AGE" ] && return 0
+  fi
+  agents_refresh || true
+}
+
+agents_summary() {
+  local provider state session age ca=0 ci=0 cc=0 xa=0 xi=0 xc=0
+  if agents_ensure_cache && [ -f "$AGENTSTATEFILE" ]; then
+    while IFS=$'\t' read -r provider session state age; do
+      case "$provider:$state" in
+        claude:active) ca=$((ca + 1)) ;; claude:idle) ci=$((ci + 1)) ;;
+        claude:completed) cc=$((cc + 1)) ;; codex:active) xa=$((xa + 1)) ;;
+        codex:idle) xi=$((xi + 1)) ;; codex:completed) xc=$((xc + 1)) ;;
+      esac
+    done < "$AGENTSTATEFILE"
+  fi
+  echo "Claude Code: $ca active · $ci idle · $cc completed"
+  echo "Codex: $xa active · $xi idle · $xc completed"
+  echo "All agents: $((ca + xa)) active · $((ci + xi)) idle · $((cc + xc)) completed"
+}
+
+agents_list() {
+  local provider session state age
+  [ "${1:-}" = "--refresh" ] && agents_refresh
+  [ "${1:-}" = "--summary" ] && { agents_refresh || true; agents_summary; return; }
+  agents_ensure_cache || return 0
+  [ -f "$AGENTSTATEFILE" ] || return 0
+  while IFS=$'\t' read -r provider session state age; do
+    printf '%s\t%s\t%s\t%ss ago\n' "$(agent_provider_name "$provider")" "$state" "$session" "$age"
+  done < "$AGENTSTATEFILE"
+}
+
 # ── network watchdog ─────────────────────────────────────────────────────────
 
 netlog() {
@@ -607,6 +718,7 @@ guard_check_once() {
   fi
 
   goals_refresh
+  agents_refresh || true
 }
 
 guard_loop() {
@@ -805,7 +917,7 @@ Normal sleep behaviour restored. Closing the lid will sleep the Mac again."
 # costs 8.5s whenever the network is down — which is exactly when the app is
 # most needed and least allowed to hang.
 status() {
-  local pid npid gpid state sleep_state net blob started left goals thermal guardian
+  local pid npid gpid state sleep_state net blob started left goals thermal guardian agent_summary
   if [ "${1:-}" = "--net" ]; then
     net_state; net=$(net_words $?)
   else
@@ -819,7 +931,12 @@ status() {
   case "$sleep_state" in 1) state="ON" ;; 0) state="OFF" ;; *) state="UNKNOWN" ;; esac
   blob=$(batt_blob)
   goals_refresh
+  # The awake-session guard owns the minute-by-minute scan while it is active.
+  # Reuse that cache here to avoid racing it and emitting duplicate transition
+  # notifications. When awake mode is off, the app's status timer is the poller.
+  if [ -f "$SESSION_DIR/active" ]; then agents_ensure_cache; else agents_refresh || true; fi
   goals=$(goals_summary)
+  agent_summary=$(agents_summary)
   thermal=$(thermal_state)
   guardian=$(guardian_status)
 
@@ -841,6 +958,7 @@ Auto-off in: $left
 Battery floor: ${BATTERY_FLOOR}%
 Thermal: $thermal
 Goals: $goals
+$agent_summary
 Network: $net
 Power: $(power_source "$blob") $(battery_pct "$blob")"
 }
@@ -851,6 +969,7 @@ case "${1:-toggle}" in
   status)  status "${2:-}" ;;
   netlog)  [ -f "$NETLOG" ] && tail -40 "$NETLOG" || echo "no watchdog log yet" ;;
   goals)   goals_list "${2:-}" ;;
+  agents)  agents_list "${2:-}" ;;
   goal)    shift; goal_command "$@" ;;
   toggle)
     sleep_state=$(sleep_disabled_state)
@@ -868,7 +987,7 @@ case "${1:-toggle}" in
   __guardian) guardian_loop ;;
   __guardian_once) guardian_check_once ;;
   __network_transition) notify_network_transition "${2:-}" "${3:-}" ;;
-  *)       echo "usage: vibecaf [on|off|toggle|status [--net]|netlog|goals|goal ...]" >&2; exit 2 ;;
+  *)       echo "usage: vibecaf [on|off|toggle|status [--net]|netlog|agents|goals|goal ...]" >&2; exit 2 ;;
 esac
 
 # Exercising the guard without waiting six hours:
