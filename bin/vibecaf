@@ -14,6 +14,9 @@ set -u
 PMSET=${VIBECAF_PMSET:-/usr/bin/pmset}
 CAFFEINATE=${VIBECAF_CAFFEINATE:-/usr/bin/caffeinate}
 NETWORKSETUP=${VIBECAF_NETWORKSETUP:-/usr/sbin/networksetup}
+IPCONFIG=${VIBECAF_IPCONFIG:-/usr/sbin/ipconfig}
+ROUTE=${VIBECAF_ROUTE:-/sbin/route}
+CURL=${VIBECAF_CURL:-/usr/bin/curl}
 OSASCRIPT=${VIBECAF_OSASCRIPT:-/usr/bin/osascript}
 SUDO=${VIBECAF_SUDO:-/usr/bin/sudo}
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
@@ -31,7 +34,7 @@ NETPIDFILE="$RUNTIME_DIR/vibecaf-net.$(id -u).pid"
 GUARDPIDFILE="$RUNTIME_DIR/vibecaf-guard.$(id -u).pid"
 STARTFILE="$SESSION_DIR/started"
 # The watchdog's latest verdict, so `status` can report the network without
-# running its own probe. See net_state / cheap_net.
+# running its own probe. See link_state / cheap_net.
 NETSTATEFILE="$RUNTIME_DIR/vibecaf-net-state.$(id -u)"
 AGENT_RUNTIME_DIR="$RUNTIME_DIR/vibecaf-agent-state.$(id -u)"
 AGENTSTATEFILE="$AGENT_RUNTIME_DIR/sessions.tsv"
@@ -69,6 +72,27 @@ MAX_BOUNCES=3         # consecutive failed bounces before we stop touching the r
 PASSIVE_EVERY=60      # probe interval once we've given up on cycling
 PASSIVE_RETRY=900     # how long to stay passive before trying the radio again
 
+# The probe target. Overridable so the classifier can be exercised against a
+# blackhole (deadlink) or a local server that answers 200 without "Success"
+# (portal) instead of waiting for a real bad network to turn up.
+PROBE_URL=${VIBECAF_PROBE_URL:-http://captive.apple.com/hotspot-detect.html}
+
+# A captive portal needs a human with a browser. Cutting the radio destroys a
+# half-finished login, so portals are left alone for this long before we treat
+# them as a wedged AP instead.
+PORTAL_GRACE=${VIBECAF_PORTAL_GRACE:-300}
+
+# Gateway answers, nothing routes. Usually upstream, occasionally an AP that has
+# wedged and will come back if bounced. Wait before touching the radio, because
+# bouncing cannot fix an upstream outage and costs a working association.
+DEADLINK_GRACE=${VIBECAF_DEADLINK_GRACE:-120}
+
+# An iPhone Personal Hotspot always hands out 172.20.10.0/24. Since macOS
+# redacts the SSID (see link_state), the subnet is the only way left to tell
+# "on cellular data" from "on Wi-Fi" — and that distinction costs money.
+HOTSPOT_SUBNET=${VIBECAF_HOTSPOT_SUBNET:-172.20.10.}
+
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 sleep_disabled_state() {
@@ -87,6 +111,15 @@ clamshell_blocked() { [ "$(sleep_disabled_state)" = "1" ]; }
 wifi_device() {
   "$NETWORKSETUP" -listallhardwareports \
     | awk '/Hardware Port: Wi-Fi/{getline; print $2; exit}'
+}
+
+# Maps a BSD device (en0) to its network *service* name ("Wi-Fi"), which is
+# what every service-layer networksetup verb takes. The name is a user-visible
+# label that can be renamed, so resolve it instead of hardcoding it.
+wifi_service() {  # wifi_service <dev>
+  "$NETWORKSETUP" -listnetworkserviceorder 2>/dev/null | awk -v dev="$1" '
+    /^\([0-9*]+\)/ { name = substr($0, index($0, ")") + 2) }
+    index($0, "Device: " dev ")") { print name; exit }'
 }
 
 pid_alive() {  # pid_alive <pidfile>
@@ -497,44 +530,146 @@ netlog() {
   printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$NETLOG"
 }
 
-# 0 = fully online, 1 = link up but no internet (captive portal / LAN only),
-# 2 = no usable link.
-net_state() {
-  if curl -s --max-time 6 http://captive.apple.com/hotspot-detect.html 2>/dev/null \
-     | grep -q Success; then
-    return 0
-  fi
-  local gw
-  gw=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')
-  if [ -n "${gw:-}" ] && ping -c1 -W 1500 "$gw" >/dev/null 2>&1; then
-    return 1
-  fi
-  return 2
+# Association without an SSID.
+#
+# macOS gates the connected network name behind Location Services authorization.
+# A shell script does not have it, so `ipconfig getsummary`, `system_profiler
+# SPAirPortDataType` and `networksetup -getairportnetwork` all return the literal
+# string "<redacted>" instead of the name. Verified 2026-08-19 on macOS 26.5.2.
+#
+# The *presence* of the field is still readable, and that is all we need: it
+# answers "are we joined to anything at all", which is the question that decides
+# between renewing a lease and cutting the radio.
+associated() {  # associated <dev>
+  "$IPCONFIG" getsummary "$1" 2>/dev/null \
+    | grep -qE '^[[:space:]]*SSID[[:space:]]*:'
 }
 
-net_words() {  # net_words <net_state return code>
+# An iPhone Personal Hotspot always hands out 172.20.10.0/24. With the SSID
+# unreadable this is the only way left to tell "on cellular data" from "on
+# Wi-Fi", and it is worth surfacing because one of them costs money.
+on_hotspot() {  # on_hotspot [dev]
+  local dev=${1:-}
+  [ -n "$dev" ] || dev=$(wifi_device)
+  case "$("$IPCONFIG" getifaddr "$dev" 2>/dev/null)" in
+    "$HOTSPOT_SUBNET"*) return 0 ;;
+  esac
+  return 1
+}
+
+# The classifier. Echoes exactly one of:
+#
+#   radio_off  the card is powered down
+#   unassoc    powered, joined to nothing
+#   noip       joined, but no address or no default route   <- lease expiry
+#   portal     something answers HTTP but it is not the internet
+#   deadlink   route exists, nothing answers at all
+#   online     the real internet
+#
+# Order matters. The link-layer checks are free reads, so doing them first means
+# a dead link costs milliseconds instead of the 6s curl timeout — the old
+# old net_state paid that timeout on every probe while we were disconnected.
+link_state() {  # link_state [dev]
+  local dev=${1:-} code body tmp gw rif
+  [ -n "$dev" ] || dev=$(wifi_device)
+
+  rif=$("$ROUTE" -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')
+  gw=$("$ROUTE" -n get default 2>/dev/null | awk '/gateway:/{print $2; exit}')
+
+  # Only interrogate the Wi-Fi link when Wi-Fi is actually the path. If USB
+  # ethernet or a tethered iPhone is carrying the default route, the state of
+  # the radio is not the question — go straight to the probe.
+  if [ -z "${rif:-}" ] || [ "$rif" = "$dev" ]; then
+    if [ -n "${dev:-}" ]; then
+      if [ "$("$NETWORKSETUP" -getairportpower "$dev" 2>/dev/null | awk '{print $NF}')" = "Off" ]; then
+        echo radio_off; return
+      fi
+      if ! associated "$dev"; then
+        echo unassoc; return
+      fi
+      if [ -z "$("$IPCONFIG" getifaddr "$dev" 2>/dev/null)" ] || [ -z "${gw:-}" ]; then
+        echo noip; return
+      fi
+    fi
+  fi
+
+  # One probe, keeping both the body and the status code, so portal and deadlink
+  # cost the same single round trip.
+  tmp=$(mktemp "$RUNTIME_DIR/vibecaf-probe.XXXXXX" 2>/dev/null) || tmp=""
+  code=$("$CURL" -s -o "${tmp:-/dev/null}" -w '%{http_code}' --max-time 6 "$PROBE_URL" 2>/dev/null) || code=000
+  if [ -n "$tmp" ]; then body=$(cat "$tmp" 2>/dev/null); rm -f "$tmp"; else body=""; fi
+
+  case "$body" in *Success*) echo online; return ;; esac
+  # Anything that answers HTTP at all is intercepting us: a portal splash, a
+  # redirect, an ISP notice page. Those need a human with a browser, never a
+  # radio bounce.
+  case "${code:-000}" in ""|000) echo deadlink ;; *) echo portal ;; esac
+}
+
+net_words() {  # net_words <link_state token>
   case "$1" in
-    0) echo "online" ;;
-    1) echo "link up, no internet" ;;
-    *) echo "DISCONNECTED" ;;
+    online)    echo "online" ;;
+    portal)    echo "captive portal — needs a browser login" ;;
+    deadlink)  echo "link up, no internet" ;;
+    noip)      echo "no IP address" ;;
+    unassoc)   echo "not associated" ;;
+    radio_off) echo "Wi-Fi off" ;;
+    *)         echo "unknown" ;;
   esac
 }
 
 # The watchdog already probes every CHECK_EVERY seconds, so anyone else asking
-# "are we online?" can read its answer instead of running a second probe. That
-# matters because net_state costs 8.5s when the network is down (6s curl
-# timeout + 2.5s ping), and the menu bar used to pay it on a 20s timer.
-publish_net() { printf '%s %s\n' "$(date +%s)" "$1" > "$NETSTATEFILE"; }
+# "are we online?" can read its answer instead of running a second probe.
+publish_net() { printf '%s %s\n' "$(date +%s)" "$1" >"$NETSTATEFILE"; }
 
-notify_network_transition() {  # notify_network_transition <previous> <current>
+notify_network_transition() {  # notify_network_transition <previous token> <current token>
   local previous=${1:-} current=${2:-}
   [ -n "$previous" ] || return 0
   [ "$previous" != "$current" ] || return 0
   case "$current" in
-    0) notify_event "Network recovered" "Internet access is available again" ;;
-    1) notify_event "Network degraded" "Link is up, but the internet is unreachable" ;;
-    2) notify_event "Network disconnected" "No usable network link" ;;
+    online)    notify_event "Network recovered" "Internet access is available again" ;;
+    portal)    notify_event "Captive portal" "Log in with a browser to get back online" ;;
+    deadlink)  notify_event "Network degraded" "Link is up, but the internet is unreachable" ;;
+    noip)      notify_event "Lost IP address" "Joined, but the DHCP lease is gone" ;;
+    unassoc)   notify_event "Network disconnected" "Wi-Fi is not joined to any network" ;;
+    radio_off) notify_event "Wi-Fi is off" "The radio is powered down" ;;
   esac
+}
+
+# Renewing the lease is the cheapest fix that can work, and it is the right one
+# for the failure that started this: on 2026-08-19 the 4h lease hard-expired at
+# 10:24:16 while the Mac stayed associated, and the watchdog's only move — cut
+# the radio — turned "associated with no lease" into "associated with nothing"
+# and cost 4m47s. A renew would have taken about two seconds.
+#
+# Do NOT renew with `ipconfig set <dev> DHCP`. That works at the *interface*
+# layer, and it plants a synthetic "DHCP-en0" service in the SCDynamicStore that
+# displaces the real Wi-Fi service as primary — and persists across link flaps
+# until reboot. Traffic still flows, but macOS's own reachability UI reads the
+# service state, so the Wi-Fi menu says "No Internet Connection" from then on.
+# Verified 2026-08-19 on macOS 26.5.2; airportd logged "No valid components
+# format from SCDynamicStore: serviceKey:'State:/Network/Global/IPv4'".
+#
+# Renew at the *service* layer instead: writing the service's Setup: config
+# makes configd restart its DHCP client cleanly. A no-op write is ignored
+# (`-setdhcp` on a service already on plain DHCP does nothing), so set a
+# throwaway client-id and then clear it — two real changes, both still DHCP.
+# If the process dies between the two calls the service is left on DHCP with a
+# client-id, which works fine and is cleared by the next renew. This sequence
+# also *repairs* an interface-layer wedge if someone runs `ipconfig set` by
+# hand. No root needed — networksetup takes service writes from an admin
+# account — so the old sudoers drop-in for ipconfig is gone. ~7s measured.
+dhcp_renew() {  # dhcp_renew <dev>
+  local svc waited=0
+  svc=$(wifi_service "$1")
+  [ -n "${svc:-}" ] || return 1
+  "$NETWORKSETUP" -setdhcp "$svc" vibecaf-renew >/dev/null 2>&1 || return 1
+  "$NETWORKSETUP" -setdhcp "$svc" >/dev/null 2>&1 || return 1
+  while [ "$waited" -lt 15 ]; do
+    [ -n "$("$IPCONFIG" getifaddr "$1" 2>/dev/null)" ] && return 0
+    sleep 1; waited=$((waited + 1))
+  done
+  return 1
 }
 
 cheap_net() {
@@ -549,10 +684,24 @@ cheap_net() {
   echo "$words"
 }
 
-# Bouncing the radio makes macOS re-run auto-join against every known network,
-# using the credentials already in the keychain. That is the whole trick — there
-# is no supported CLI to "reconnect to the last network" on macOS 14.4+, and the
-# old `airport` utility was removed.
+# Bouncing the radio makes macOS re-run auto-join across every known network,
+# using the credentials already in the keychain. That is the whole trick, and on
+# this OS it is the ONLY trick.
+#
+# Do not replace this with `networksetup -setairportnetwork`. Tested 2026-08-19
+# on macOS 26.5.2 against the network the Mac was already associated to:
+#
+#   $ networksetup -setairportnetwork en0 "<the current network>"
+#   Failed to join network ...
+#   Error: -3900  The operation couldn't be completed. tmpErr
+#   $ ipconfig getifaddr en0        -> empty. It disassociated us.
+#
+# So a join-by-name does not work AND a failed attempt drops a working link. The
+# SSID cannot be read either (see `associated`), so there is nothing to aim at
+# even if it did. macOS's own auto-join priority list is therefore the fallback
+# mechanism — including the fall back to an iPhone Personal Hotspot, which sits
+# in that list like any other known network. Our job is to trigger auto-join and
+# then get out of its way.
 #
 # Returns 0 as soon as we're online again. It polls instead of sleeping a fixed
 # amount because auto-join + DHCP regularly takes 20-40s (an iPhone hotspot has
@@ -567,89 +716,148 @@ wifi_bounce() {
   "$NETWORKSETUP" -setairportpower "$dev" on >/dev/null 2>&1
   while [ "$waited" -lt "$ASSOC_TIMEOUT" ]; do
     sleep 5; waited=$((waited + 5))
-    if net_state; then
+    if [ "$(link_state "$dev")" = online ]; then
       netlog "associated after ${waited}s"
       return 0
     fi
   done
-  netlog "no internet ${ASSOC_TIMEOUT}s after cycling (ip: $(ipconfig getifaddr "$dev" 2>/dev/null || echo none))"
+  netlog "no internet ${ASSOC_TIMEOUT}s after cycling (ip: $("$IPCONFIG" getifaddr "$dev" 2>/dev/null || echo none))"
   return 1
 }
 
+# The recovery ladder, cheapest and least destructive first:
+#
+#   radio_off -> switch the card on
+#   noip      -> renew the DHCP lease           (no association lost)
+#   portal    -> wait PORTAL_GRACE for a human  (a bounce would kill the login)
+#   deadlink  -> wait DEADLINK_GRACE            (a bounce cannot fix upstream)
+#   unassoc   -> bounce the radio               (forces macOS auto-join)
+#   exhausted -> passive: radio on, hands off, let auto-join work
+#
+# The old loop had one rung — bounce — and applied it to everything, which is
+# how a dead DHCP lease on a perfectly good association turned into a five
+# minute outage.
 netwatch_loop() {
-  local dev fails=0 backoff=$CHECK_EVERY recoveries=0 bounces=0 passive_since=0 now last_st="" st
+  local dev st last_st="" fails=0 backoff=$CHECK_EVERY recoveries=0 bounces=0
+  local passive_since=0 degraded_since=0 renew_tried=0 now hs
+
   dev=$(wifi_device)
   if [ -z "${dev:-}" ]; then netlog "no Wi-Fi interface found; watchdog exiting"; return; fi
   netlog "watchdog started on $dev"
 
-  # A radio that got switched off is the cheapest possible failure to fix.
-  if [ "$("$NETWORKSETUP" -getairportpower "$dev" | awk '{print $NF}')" = "Off" ]; then
-    netlog "Wi-Fi was off; turning it on"
-    "$NETWORKSETUP" -setairportpower "$dev" on >/dev/null 2>&1
-    sleep 10
-  fi
-
   while :; do
-    net_state; st=$?
+    st=$(link_state "$dev")
     publish_net "$(net_words "$st")"
     notify_network_transition "$last_st" "$st"
+    if [ -n "$last_st" ] && [ "$last_st" != "$st" ]; then netlog "state: $last_st -> $st"; fi
     last_st=$st
-    case $st in
-      0)
-        if [ "$fails" -gt 0 ]; then netlog "back online after $fails failed probe(s)"; fi
-        fails=0; backoff=$CHECK_EVERY; bounces=0; passive_since=0
-        sleep "$CHECK_EVERY"
-        ;;
-      1)
-        # Link is fine, the internet isn't. Bouncing the radio cannot fix a
-        # captive portal or an upstream outage, so don't thrash — just note it.
-        if [ "$fails" -eq 0 ]; then netlog "link up but no internet (captive portal or upstream down) — not cycling"; fi
-        fails=$((fails + 1))
-        sleep "$CHECK_EVERY"
-        ;;
-      2)
-        fails=$((fails + 1))
-        # Don't log every probe while passive — that's one line a minute for as
-        # long as the network is gone, which buries the lines that matter.
-        [ "$passive_since" -eq 0 ] && netlog "probe failed ($fails)"
 
-        # Passive mode: MAX_BOUNCES in a row didn't help, so the problem isn't
-        # the radio — the network is gone (hotspot off, out of range, router
-        # down). Leave the radio ON and stay out of the way; macOS re-runs
-        # auto-join on its own, and it can only do that if we stop cutting
-        # power to the card. Try again much later in case we've moved.
-        if [ "$passive_since" -ne 0 ]; then
-          now=$(date +%s)
-          if [ $(( now - passive_since )) -lt "$PASSIVE_RETRY" ]; then
-            sleep "$PASSIVE_EVERY"; continue
-          fi
-          netlog "passive window over; trying the radio again"
-          passive_since=0; bounces=0
-        fi
+    if [ "$st" = "online" ]; then
+      if [ "$fails" -gt 0 ]; then
+        hs=""; on_hotspot "$dev" && hs=" — on iPhone hotspot (cellular data)"
+        netlog "online again after $fails failed probe(s)$hs"
+      fi
+      fails=0; backoff=$CHECK_EVERY; bounces=0
+      passive_since=0; degraded_since=0; renew_tried=0
+      sleep "$CHECK_EVERY"; continue
+    fi
 
-        if [ "$fails" -ge "$FAILS_BEFORE_CYCLE" ]; then
-          recoveries=$((recoveries + 1))
-          if wifi_bounce "$dev"; then
-            netlog "reconnected (recovery #$recoveries)"
-            fails=0; backoff=$CHECK_EVERY; bounces=0
-          else
-            bounces=$((bounces + 1))
-            if [ "$bounces" -ge "$MAX_BOUNCES" ]; then
-              "$NETWORKSETUP" -setairportpower "$dev" on >/dev/null 2>&1
-              passive_since=$(date +%s)
-              netlog "$bounces cycles didn't help — network is gone, not the radio. Waiting ${PASSIVE_RETRY}s, radio left on."
-              sleep "$PASSIVE_EVERY"
-            else
-              backoff=$(( backoff * 2 )); [ "$backoff" -gt "$BACKOFF_MAX" ] && backoff=$BACKOFF_MAX
-              netlog "still down; retrying in ${backoff}s"
-              sleep "$backoff"
+    fails=$((fails + 1))
+    now=$(date +%s)
+
+    case "$st" in
+      radio_off)
+        # Cheapest possible failure to fix, and it does not need a bounce.
+        netlog "Wi-Fi is off; turning it on"
+        "$NETWORKSETUP" -setairportpower "$dev" on >/dev/null 2>&1
+        sleep 10
+        continue
+        ;;
+
+      noip)
+        # Joined, but no address or no default route. This is the failure that
+        # cost 4m47s on 2026-08-19: the 4h lease hard-expired at 10:24:16 while
+        # the Mac stayed associated, and the watchdog cut the radio anyway.
+        # Renewing keeps the association and usually takes about two seconds.
+        if [ "$renew_tried" -eq 0 ]; then
+          renew_tried=1
+          netlog "associated but no IP — renewing DHCP lease"
+          if dhcp_renew "$dev"; then
+            sleep 1
+            if [ "$(link_state "$dev")" = online ]; then
+              netlog "DHCP renew restored the link"
+              continue
             fi
+            netlog "DHCP renew got an address but no internet — escalating"
+          else
+            netlog "DHCP renew failed — escalating"
           fi
-        else
-          sleep 5
         fi
+        ;;
+
+      portal)
+        # Only a browser login fixes this, and a bounce would destroy a
+        # half-finished one. Wait it out; if it is still stuck after the grace
+        # period, the thing intercepting us is probably just a wedged AP.
+        if [ "$degraded_since" -eq 0 ]; then degraded_since=$now; fi
+        if [ $(( now - degraded_since )) -lt "$PORTAL_GRACE" ]; then
+          sleep "$CHECK_EVERY"; continue
+        fi
+        netlog "portal unresolved after $(( now - degraded_since ))s — treating it as a wedged AP"
+        degraded_since=0
+        ;;
+
+      deadlink)
+        # The gateway answers but nothing routes. That is upstream far more
+        # often than it is the radio, and a bounce cannot fix upstream — it just
+        # spends a working association. Wait before escalating.
+        if [ "$degraded_since" -eq 0 ]; then degraded_since=$now; fi
+        if [ $(( now - degraded_since )) -lt "$DEADLINK_GRACE" ]; then
+          sleep "$CHECK_EVERY"; continue
+        fi
+        netlog "no route out for $(( now - degraded_since ))s — escalating"
+        degraded_since=0
         ;;
     esac
+
+    # ── escalation: the radio bounce, and then hands off ────────────────────
+    #
+    # Passive mode: MAX_BOUNCES in a row didn't help, so the problem isn't the
+    # radio — the network is gone (hotspot off, out of range, router down).
+    # Leave the radio ON and stay out of the way; macOS re-runs auto-join on its
+    # own, and it can only do that if we stop cutting power to the card. That
+    # auto-join is also the whole fallback story, since nothing here can join a
+    # network by name (see wifi_bounce).
+    if [ "$passive_since" -ne 0 ]; then
+      if [ $(( now - passive_since )) -lt "$PASSIVE_RETRY" ]; then
+        sleep "$PASSIVE_EVERY"; continue
+      fi
+      netlog "passive window over; trying the radio again"
+      passive_since=0; bounces=0
+    fi
+
+    if [ "$fails" -lt "$FAILS_BEFORE_CYCLE" ]; then
+      sleep 5; continue
+    fi
+
+    recoveries=$((recoveries + 1))
+    if wifi_bounce "$dev"; then
+      hs=""; on_hotspot "$dev" && hs=" — on iPhone hotspot (cellular data)"
+      netlog "reconnected (recovery #$recoveries)$hs"
+      fails=0; backoff=$CHECK_EVERY; bounces=0; renew_tried=0
+    else
+      bounces=$((bounces + 1))
+      if [ "$bounces" -ge "$MAX_BOUNCES" ]; then
+        "$NETWORKSETUP" -setairportpower "$dev" on >/dev/null 2>&1
+        passive_since=$(date +%s)
+        netlog "$bounces cycles didn't help — network is gone, not the radio. Waiting ${PASSIVE_RETRY}s, radio left on."
+        sleep "$PASSIVE_EVERY"
+      else
+        backoff=$(( backoff * 2 )); [ "$backoff" -gt "$BACKOFF_MAX" ] && backoff=$BACKOFF_MAX
+        netlog "still down; retrying in ${backoff}s"
+        sleep "$backoff"
+      fi
+    fi
   done
 }
 
@@ -916,10 +1124,52 @@ Normal sleep behaviour restored. Closing the lid will sleep the Mac again."
 # force a live probe. The menu bar polls this on a timer, and a probe there
 # costs 8.5s whenever the network is down — which is exactly when the app is
 # most needed and least allowed to hang.
+# The renew is unprivileged (see dhcp_renew), so it is available whenever the
+# device maps to a network service at all.
+dhcp_renew_available() {  # dhcp_renew_available <dev>
+  [ -n "$(wifi_service "$1")" ]
+}
+
+# Read-only. Prints the current classification and what the ladder would do
+# about it, without doing any of it. Run this before any live test.
+netdiag() {
+  local dev st ip gw radio
+  dev=$(wifi_device)
+  st=$(link_state "$dev")
+  ip=$("$IPCONFIG" getifaddr "$dev" 2>/dev/null) || ip=""
+  gw=$("$ROUTE" -n get default 2>/dev/null | awk '/gateway:/{print $2; exit}')
+  radio=$("$NETWORKSETUP" -getairportpower "$dev" 2>/dev/null | awk '{print $NF}')
+
+  echo "device:      ${dev:-none}"
+  echo "radio:       ${radio:-unknown}"
+  echo "associated:  $(associated "$dev" && echo yes || echo no)"
+  echo "address:     ${ip:-none}"
+  echo "gateway:     ${gw:-none}"
+  echo "carrier:     $(on_hotspot "$dev" && echo 'iPhone Personal Hotspot — cellular data' || echo 'Wi-Fi')"
+  echo "state:       $st — $(net_words "$st")"
+  echo "probe:       $PROBE_URL"
+  echo "DHCP renew:  $(dhcp_renew_available "$dev" && echo "available (service: $(wifi_service "$dev"))" || echo 'UNAVAILABLE — no network service maps to this device')"
+  echo -n "would do:    "
+  case "$st" in
+    online)    echo "nothing — sleep ${CHECK_EVERY}s" ;;
+    radio_off) echo "turn the radio on" ;;
+    noip)      echo "renew the DHCP lease, then bounce only if that fails" ;;
+    portal)    echo "wait up to ${PORTAL_GRACE}s for a browser login, then treat as wedged" ;;
+    deadlink)  echo "wait up to ${DEADLINK_GRACE}s, then bounce the radio" ;;
+    unassoc)   echo "bounce the radio to force macOS auto-join" ;;
+    *)         echo "unknown state" ;;
+  esac
+  echo
+  echo "note: the SSID is unreadable (macOS redacts it without Location access),"
+  echo "      and joining by name is broken on this OS, so macOS auto-join — not"
+  echo "      this script — decides which network a bounce lands on. Its priority"
+  echo "      order is Settings > Wi-Fi > Known Networks."
+}
+
 status() {
-  local pid npid gpid state sleep_state net blob started left goals thermal guardian agent_summary
+  local pid npid gpid state sleep_state net blob started left goals thermal guardian agent_summary carrier
   if [ "${1:-}" = "--net" ]; then
-    net_state; net=$(net_words $?)
+    net=$(net_words "$(link_state)")
   else
     net=$(cheap_net)
   fi
@@ -939,6 +1189,7 @@ status() {
   agent_summary=$(agents_summary)
   thermal=$(thermal_state)
   guardian=$(guardian_status)
+  carrier=$(on_hotspot && echo "iPhone hotspot (cellular data)" || echo "Wi-Fi")
 
   left="n/a"
   if [ "$state" = "ON" ] && [ -f "$STARTFILE" ]; then
@@ -960,6 +1211,7 @@ Thermal: $thermal
 Goals: $goals
 $agent_summary
 Network: $net
+Carrier: $carrier
 Power: $(power_source "$blob") $(battery_pct "$blob")"
 }
 
@@ -968,6 +1220,7 @@ case "${1:-toggle}" in
   off)     turn_off ;;
   status)  status "${2:-}" ;;
   netlog)  [ -f "$NETLOG" ] && tail -40 "$NETLOG" || echo "no watchdog log yet" ;;
+  netdiag) netdiag ;;
   goals)   goals_list "${2:-}" ;;
   agents)  agents_list "${2:-}" ;;
   goal)    shift; goal_command "$@" ;;
@@ -987,7 +1240,8 @@ case "${1:-toggle}" in
   __guardian) guardian_loop ;;
   __guardian_once) guardian_check_once ;;
   __network_transition) notify_network_transition "${2:-}" "${3:-}" ;;
-  *)       echo "usage: vibecaf [on|off|toggle|status [--net]|netlog|agents|goals|goal ...]" >&2; exit 2 ;;
+  __dhcp_renew) dhcp_renew "${2:-$(wifi_device)}" ;;
+  *)       echo "usage: vibecaf [on|off|toggle|status [--net]|netlog|netdiag|agents|goals|goal ...]" >&2; exit 2 ;;
 esac
 
 # Exercising the guard without waiting six hours:

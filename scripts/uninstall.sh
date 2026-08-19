@@ -21,9 +21,14 @@ fi
 rm -f "$PLIST" "$GUARDIAN_PLIST" "$WRAPPER"
 rm -rf "$APP"
 
-rule="/etc/sudoers.d/closed-lid-awake-$account"
-if [ -e "$rule" ]; then
-  sudo rm -f "$rule"
-fi
+# The second file is a retired grant: the DHCP renew briefly ran through a
+# root-only `ipconfig set`, first via `vibecaf install-sudoers`, then via an
+# install.sh rule, before moving to unprivileged service-layer networksetup
+# (see dhcp_renew in bin/vibecaf). Remove it wherever it still exists.
+for rule in "/etc/sudoers.d/closed-lid-awake-$account" /etc/sudoers.d/vibecaf-ipconfig; do
+  if [ -e "$rule" ]; then
+    sudo rm -f "$rule"
+  fi
+done
 
 echo "Removed Closed-Lid Awake. Normal sleep is enabled."

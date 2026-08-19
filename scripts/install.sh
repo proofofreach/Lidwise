@@ -66,6 +66,10 @@ if [ "$with_sudoers" -eq 1 ]; then
       exit 1
       ;;
   esac
+  # The Wi-Fi watchdog's DHCP renew is unprivileged (service-layer networksetup;
+  # see dhcp_renew in bin/vibecaf) — do not add an ipconfig rule here. The
+  # interface-layer `ipconfig set <dev> DHCP` it would enable wedges the macOS
+  # reachability UI ("No Internet Connection" while traffic flows fine).
   rule=$(mktemp "${TMPDIR:-/tmp}/closed-lid-awake-sudoers.XXXXXX")
   trap 'rm -f "$rule"' EXIT
   printf '%s ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1\n' \
