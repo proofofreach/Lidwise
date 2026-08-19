@@ -49,6 +49,28 @@ grep -q '^All agents: 2 active · 1 idle · 1 completed$' <<< "$summary"
 [ ! -e "$VIBECAF_STATE_DIR/session/active" ]
 [ ! -e "$VIBECAF_NOTIFY_LOG" ]
 
+# MCP servers are not sessions: with no Codex logs, `codex mcp-server` alone
+# must not produce a synthetic idle Codex row.
+mkdir -p "$TEST_ROOT/mcp-only"
+printf '%s\n' \
+  '201 1 node /opt/homebrew/bin/codex mcp-server' \
+  '202 201 /opt/homebrew/lib/node_modules/@openai/codex/vendor/bin/codex mcp-server' \
+  '203 1 claude mcp serve' \
+  '204 1 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Helpers/browser_crashpad_handler --monitor-self' \
+  > "$TEST_ROOT/mcp-only/processes.txt"
+mcp_summary=$(VIBECAF_AGENT_PROCESS_FILE="$TEST_ROOT/mcp-only/processes.txt" \
+  VIBECAF_CODEX_SESSIONS="$TEST_ROOT/mcp-only/codex" \
+  VIBECAF_CLAUDE_SESSIONS="$TEST_ROOT/mcp-only/claude" \
+  "$ROOT/bin/vibecaf-agent-scan")
+[ -z "$mcp_summary" ]
+# …but a real Codex CLI process still counts as connected.
+printf '%s\n' '205 1 /opt/homebrew/bin/codex' > "$TEST_ROOT/mcp-only/processes.txt"
+mcp_summary=$(VIBECAF_AGENT_PROCESS_FILE="$TEST_ROOT/mcp-only/processes.txt" \
+  VIBECAF_CODEX_SESSIONS="$TEST_ROOT/mcp-only/codex" \
+  VIBECAF_CLAUDE_SESSIONS="$TEST_ROOT/mcp-only/claude" \
+  "$ROOT/bin/vibecaf-agent-scan")
+grep -q $'^codex\tcodex\tidle\t0$' <<< "$mcp_summary"
+
 # Per-session freshness, not a provider-global process flag, drives state.
 printf '%s\n' \
   '102 1 /Applications/ChatGPT.app/Contents/Resources/codex app-server --listen stdio://' \

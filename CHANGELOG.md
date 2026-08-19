@@ -6,7 +6,25 @@
 - Added agent activity and restart notifications without giving agents control
   of the global work window.
 - Rebuilt the menu around a compact work-window and session-fleet card.
+- Restyled the whole menu as one dark panel: every action row now shares the
+  card's palette, with icons, hover and keyboard highlight, check indicators,
+  and shortcut glyphs; native key equivalents and accessibility are kept.
+- Agent discovery no longer counts MCP servers (`codex mcp-server`,
+  `claude mcp serve`) or crash-reporter helpers as connected sessions, which
+  produced a phantom "1 idle" Codex entry.
 - Added `vibecaf agents` commands for per-session and aggregate status.
+- Replaced the single radio-bounce network recovery with a state ladder:
+  `link_state` classifies `radio_off | unassoc | noip | portal | deadlink |
+  online` and each state gets its cheapest fix. A dead DHCP lease on a live
+  association now recovers in ~9s instead of minutes.
+- Renew DHCP at the service layer (`networksetup -setdhcp`), which needs no
+  root. Retired the `ipconfig` sudoers grant: its interface-layer renew wedged
+  the macOS Wi-Fi menu on "No Internet Connection" until reboot.
+- Left captive portals to a human (grace period, never a radio bounce) and
+  gave wedged-but-associated links a grace period before escalating.
+- Added `vibecaf netdiag`, a read-only dry run of the recovery ladder, and an
+  iPhone-hotspot indicator (by subnet — macOS redacts the SSID) to status and
+  the menu bar.
 
 ## 1.1.0 — 2026-08-14
 

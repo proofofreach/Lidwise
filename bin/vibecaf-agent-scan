@@ -18,13 +18,22 @@ else
   PROCESS_SNAPSHOT=$(ps -x -o pid=,ppid=,command= 2>/dev/null || true)
 fi
 
+# A provider counts as connected only when a real session process is running.
+# MCP servers (`codex mcp-server`, `claude mcp serve`) are spawned by *other*
+# agents and sit idle waiting for calls; when they do work they write a session
+# log and are counted from that. Matching them here invented an idle Codex
+# session whenever Claude Code had its Codex plugin loaded. Crash reporters
+# (ChatGPT.app's "Codex Framework.framework/.../crashpad_handler") are helpers
+# of the same kind: always running, never a session.
 connected() {
+  local snapshot
+  snapshot=$(printf '%s\n' "$PROCESS_SNAPSHOT" | grep -Eiv 'mcp-server|mcp serve|crashpad')
   case "$1" in
     claude)
-      printf '%s\n' "$PROCESS_SNAPSHOT" \
+      printf '%s\n' "$snapshot" \
         | grep -Eiq '(^|[ /])claude([[:space:]]|$)' ;;
     codex)
-      printf '%s\n' "$PROCESS_SNAPSHOT" \
+      printf '%s\n' "$snapshot" \
         | grep -Eiq '(^|[ /])codex([[:space:]]|$)|Codex\.app|/Codex \(' ;;
   esac
 }

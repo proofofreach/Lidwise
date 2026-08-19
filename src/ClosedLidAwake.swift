@@ -44,6 +44,7 @@ struct State {
     var onBattery = false
     var net = ""
     var netOK = false
+    var carrier = ""
     var watchdog = false
     var guarded = false
     var guardian = ""
@@ -77,6 +78,9 @@ func readState(probeNet: Bool = false) -> State {
             s.net = line.replacingOccurrences(of: "Network: ", with: "")
             s.netOK = line.contains("online")
         }
+        if line.hasPrefix("Carrier:") {
+            s.carrier = line.replacingOccurrences(of: "Carrier: ", with: "")
+        }
         if line.hasPrefix("Wi-Fi watchdog pid:") { s.watchdog = !line.contains("none") }
         if line.hasPrefix("Guard pid:") { s.guarded = !line.contains("none") }
         if line.hasPrefix("Crash guardian:") { s.guardian = line.replacingOccurrences(of: "Crash guardian: ", with: "") }
@@ -90,20 +94,281 @@ func readState(probeNet: Bool = false) -> State {
     return s
 }
 
-private struct WorkWindowCard: View {
+// One palette for the whole menu. The card and every action row below it draw
+// from these tokens, so the menu reads as a single panel rather than a styled
+// card bolted onto a stock NSMenu.
+enum Ink {
+    static let canvas = Color(red: 0.055, green: 0.067, blue: 0.12)
+    static let bay = Color(red: 0.075, green: 0.09, blue: 0.16)
+    static let rail = Color(red: 0.065, green: 0.078, blue: 0.135)
+    static let line = Color.white.opacity(0.11)
+    static let hover = Color.white.opacity(0.07)
+    static let primary = Color(red: 0.92, green: 0.94, blue: 1.0)
+    static let secondary = Color(red: 0.62, green: 0.66, blue: 0.82)
+    static let tertiary = Color(red: 0.62, green: 0.66, blue: 0.82).opacity(0.7)
+    static let accent = Color(red: 0.39, green: 0.55, blue: 1.0)
+    static let mint = Color(red: 0.39, green: 0.85, blue: 0.69)
+    static let amber = Color(red: 0.95, green: 0.69, blue: 0.32)
+    static let coral = Color(red: 1.0, green: 0.46, blue: 0.48)
+
+    static let panelWidth: CGFloat = 408
+    static let panelRadius: CGFloat = 18
+    static let inset: CGFloat = 18
+}
+
+// Where a view sits in the stacked panel. The menu is several NSMenuItems, each
+// with its own view, so every item paints its own slice of one continuous
+// rounded panel: the top slice rounds its upper corners, the bottom slice its
+// lower corners, and the middle slices draw only the two vertical edges.
+enum PanelSlice {
+    case top, middle, bottom, whole
+
+    var roundsTop: Bool { self == .top || self == .whole }
+    var roundsBottom: Bool { self == .bottom || self == .whole }
+}
+
+private struct PanelSliceBackground: ViewModifier {
+    let slice: PanelSlice
+
+    func body(content: Content) -> some View {
+        // The rounded rect is pushed past the clip on the sides that must stay
+        // open, so clipping leaves only the edges this slice owns — no seams,
+        // no per-corner shape maths.
+        let bleed = Ink.panelRadius + 2
+        content
+            .background(
+                RoundedRectangle(cornerRadius: Ink.panelRadius)
+                    .fill(Ink.canvas)
+                    .padding(.top, slice.roundsTop ? 0 : -bleed)
+                    .padding(.bottom, slice.roundsBottom ? 0 : -bleed)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Ink.panelRadius)
+                    .stroke(Ink.line, lineWidth: 1)
+                    .padding(.top, slice.roundsTop ? 0 : -bleed)
+                    .padding(.bottom, slice.roundsBottom ? 0 : -bleed)
+            )
+            .clipped()
+    }
+}
+
+extension View {
+    func panelSlice(_ slice: PanelSlice) -> some View { modifier(PanelSliceBackground(slice: slice)) }
+}
+
+// State for one action row. Mutated from applyState() so rows update in place
+// without rebuilding their hosting views.
+final class PanelRowModel: ObservableObject {
+    @Published var symbol: String
+    @Published var title: String
+    @Published var subtitle: String
+    @Published var shortcut: String
+    @Published var checked: Bool?
+    @Published var warning = false
+    @Published var highlighted = false
+    // nil: plain row. false/true: disclosure row, collapsed/expanded.
+    @Published var expanded: Bool?
+    let slice: PanelSlice
+    // Rows inside the settings drawer sit one step in from the top-level rows.
+    let nested: Bool
+    // Toggles and the drawer header flip in place; everything else dismisses.
+    let closesMenu: Bool
+
+    init(symbol: String, title: String, subtitle: String = "", shortcut: String = "",
+         checked: Bool? = nil, expanded: Bool? = nil, slice: PanelSlice = .middle,
+         nested: Bool = false, closesMenu: Bool = true) {
+        self.symbol = symbol
+        self.title = title
+        self.subtitle = subtitle
+        self.shortcut = shortcut
+        self.checked = checked
+        self.expanded = expanded
+        self.slice = slice
+        self.nested = nested
+        self.closesMenu = closesMenu
+    }
+}
+
+struct PanelRow: View {
+    @ObservedObject var model: PanelRowModel
+
+    var body: some View {
+        HStack(spacing: 11) {
+            Image(systemName: model.symbol)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(model.warning ? Ink.coral : Ink.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(model.warning ? Ink.coral : Ink.primary)
+                if !model.subtitle.isEmpty {
+                    Text(model.subtitle)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Ink.tertiary)
+                }
+            }
+            .lineLimit(1)
+            Spacer(minLength: 8)
+            if let checked = model.checked {
+                Image(systemName: checked ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(checked ? Ink.mint : Ink.tertiary)
+                    .accessibilityHidden(true)
+            }
+            if !model.shortcut.isEmpty {
+                Text(model.shortcut)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(Ink.tertiary)
+                    .tracking(1)
+            }
+            if let expanded = model.expanded {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Ink.tertiary)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .frame(width: 14)
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.leading, model.nested ? 26 : 12)
+        .padding(.trailing, 12)
+        .frame(height: model.subtitle.isEmpty ? 34 : 42)
+        .background(
+            RoundedRectangle(cornerRadius: 9)
+                .fill(model.highlighted ? Ink.hover : Color.clear)
+        )
+        .padding(.horizontal, 8)
+        .padding(.vertical, 1)
+        .frame(width: Ink.panelWidth)
+        .padding(.bottom, model.slice.roundsBottom ? 9 : 0)
+        .panelSlice(model.slice)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(model.title)
+        .accessibilityValue(model.checked.map { $0 ? "on" : "off" } ?? "")
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
+// Small caps group label inside the settings drawer.
+struct PanelLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text.uppercased())
+            .font(.system(size: 10, weight: .semibold))
+            .tracking(0.8)
+            .foregroundStyle(Ink.tertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, Ink.inset + 8)
+            .padding(.top, 8)
+            .padding(.bottom, 3)
+            .frame(width: Ink.panelWidth)
+            .panelSlice(.middle)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+struct PanelDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Ink.line)
+            .frame(height: 1)
+            .padding(.horizontal, Ink.inset)
+            .padding(.vertical, 6)
+            .frame(width: Ink.panelWidth)
+            .panelSlice(.middle)
+    }
+}
+
+// NSMenu never routes clicks on a custom item view to the item's action, and
+// it never draws highlight for one either — the view owns both. This view hosts
+// a SwiftUI row, mirrors the item's highlight (mouse and keyboard) into the
+// model, and fires the action itself on mouse-up. The NSMenuItem keeps its
+// action/target so key equivalents and Return still work natively.
+final class PanelRowHostView: NSView {
+    let model: PanelRowModel
+    private let host: NSHostingView<AnyView>
+    private let onClick: (() -> Void)?
+    private var mouseInside = false
+
+    init(model: PanelRowModel, onClick: (() -> Void)?) {
+        self.model = model
+        self.onClick = onClick
+        host = NSHostingView(rootView: AnyView(PanelRow(model: model)))
+        super.init(frame: .zero)
+        let size = host.fittingSize
+        frame = NSRect(origin: .zero, size: size)
+        host.frame = bounds
+        host.autoresizingMask = [.width, .height]
+        addSubview(host)
+    }
+
+    static func passive<V: View>(_ view: V) -> NSView {
+        let host = NSHostingView(rootView: view)
+        host.frame = NSRect(origin: .zero, size: host.fittingSize)
+        return host
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    // Clicks anywhere on the row belong to the row, not to the hosted text.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        frame.contains(point) ? self : nil
+    }
+
+    override func mouseEntered(with event: NSEvent) { mouseInside = true; syncHighlight() }
+    override func mouseExited(with event: NSEvent) { mouseInside = false; syncHighlight() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        syncHighlight()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // A menu that closed and reopened must not keep a stale highlight.
+        mouseInside = false
+        syncHighlight()
+    }
+
+    private func syncHighlight() {
+        let enabled = enclosingMenuItem?.isEnabled ?? true
+        let h = enabled && (mouseInside || (enclosingMenuItem?.isHighlighted ?? false))
+        if model.highlighted != h {
+            DispatchQueue.main.async { [model] in model.highlighted = h }
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard enclosingMenuItem?.isEnabled ?? true else { return }
+        if model.closesMenu { enclosingMenuItem?.menu?.cancelTracking() }
+        onClick?()
+    }
+}
+
+struct WorkWindowCard: View {
     let state: State
     let onToggle: () -> Void
+    var slice: PanelSlice = .top
 
-    private let canvas = Color(red: 0.055, green: 0.067, blue: 0.12)
-    private let bay = Color(red: 0.075, green: 0.09, blue: 0.16)
-    private let rail = Color(red: 0.065, green: 0.078, blue: 0.135)
-    private let line = Color.white.opacity(0.11)
-    private let primary = Color(red: 0.92, green: 0.94, blue: 1.0)
-    private let secondary = Color(red: 0.62, green: 0.66, blue: 0.82)
-    private let accent = Color(red: 0.39, green: 0.55, blue: 1.0)
-    private let mint = Color(red: 0.39, green: 0.85, blue: 0.69)
-    private let amber = Color(red: 0.95, green: 0.69, blue: 0.32)
-    private let coral = Color(red: 1.0, green: 0.46, blue: 0.48)
+    private let canvas = Ink.canvas
+    private let bay = Ink.bay
+    private let rail = Ink.rail
+    private let line = Ink.line
+    private let primary = Ink.primary
+    private let secondary = Ink.secondary
+    private let accent = Ink.accent
+    private let mint = Ink.mint
+    private let amber = Ink.amber
+    private let coral = Ink.coral
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -168,11 +433,10 @@ private struct WorkWindowCard: View {
             .font(.system(size: 11.5, weight: .medium))
             .foregroundStyle(secondary)
         }
-        .padding(18)
-        .frame(width: 408)
-        .background(RoundedRectangle(cornerRadius: 18).fill(canvas))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(line, lineWidth: 1))
-        .padding(.vertical, 6)
+        .padding(Ink.inset)
+        .padding(.bottom, slice.roundsBottom ? 0 : -4)
+        .frame(width: Ink.panelWidth)
+        .panelSlice(slice)
     }
 
     private var windowDetail: String {
@@ -211,8 +475,15 @@ private struct WorkWindowCard: View {
 
     private var networkDetail: String {
         guard !state.net.isEmpty else { return "network unknown" }
-        if state.on && state.watchdog { return "\(state.net) · recovery" }
-        return state.net
+        // macOS will not tell a shell script which network it is on — the SSID
+        // comes back as "<redacted>" without Location access — so the carrier
+        // line reports the one distinction that costs money: an iPhone hotspot
+        // is cellular data, and you want to know you are silently on it.
+        let onHotspot = state.carrier.contains("hotspot")
+        var detail = state.net
+        if onHotspot { detail += " · hotspot" }
+        if state.on && state.watchdog { detail += " · recovery" }
+        return detail
     }
 
     private func providerBay(_ name: String, counts: AgentCounts) -> some View {
@@ -305,25 +576,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static let lastGoodKey = "LastGoodPreferredPosition"
 
     let cardItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    let netLogItem = NSMenuItem(title: "Open Wi-Fi watchdog log", action: #selector(openNetLog), keyEquivalent: "")
-    let toggleItem = NSMenuItem(title: "", action: #selector(toggle), keyEquivalent: "a")
-    let hotkeyItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    let placementItem = NSMenuItem(title: "Move icon out of the notch", action: #selector(fixPlacement), keyEquivalent: "")
+    let toggleItem = NSMenuItem(title: "Turn Off Work Window", action: #selector(toggle), keyEquivalent: "a")
     let autoItem = NSMenuItem(title: "Enable awake mode at login", action: #selector(toggleAuto), keyEquivalent: "")
     let loginItem = NSMenuItem(title: "Show in menu bar at login", action: #selector(toggleLogin), keyEquivalent: "")
+    let netLogItem = NSMenuItem(title: "Open Wi-Fi watchdog log", action: #selector(openNetLog), keyEquivalent: "")
+    let placementItem = NSMenuItem(title: "Move icon out of the notch", action: #selector(fixPlacement), keyEquivalent: "")
+    let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+    // Every row below the card is a hosted SwiftUI view drawn from the same
+    // palette, so the menu is one panel top to bottom. The NSMenuItems stay
+    // real items: titles for accessibility, actions for key equivalents.
+    let toggleRow = PanelRowModel(symbol: "power", title: "Turn off work window", subtitle: "Hotkey ⌃⌥A", shortcut: "⌘A")
+    let settingsRow = PanelRowModel(symbol: "gearshape.fill", title: "Settings",
+                                    subtitle: "Startup · Wi-Fi log · icon placement", expanded: false, closesMenu: false)
+    let autoRow = PanelRowModel(symbol: "sunrise.fill", title: "Enable awake mode at login", checked: false, nested: true, closesMenu: false)
+    let loginRow = PanelRowModel(symbol: "menubar.rectangle", title: "Show in menu bar at login", checked: false, nested: true, closesMenu: false)
+    let netLogRow = PanelRowModel(symbol: "doc.text.magnifyingglass", title: "Open Wi-Fi watchdog log", shortcut: "↗", nested: true)
+    let placementRow = PanelRowModel(symbol: "arrow.left.to.line", title: "Move icon out of the notch", nested: true)
+    let quitRow = PanelRowModel(symbol: "xmark.square.fill", title: "Quit Closed-Lid Awake", shortcut: "⌘Q", slice: .bottom)
+
+    // Progressive disclosure: the menu opens to the card, the one primary
+    // action, and Quit. Startup and tool rows live in a drawer under
+    // "Settings" and are hidden NSMenuItems until it is opened.
+    let settingsItem = NSMenuItem(title: "Settings", action: #selector(toggleSettings), keyEquivalent: "")
+    var drawerItems: [NSMenuItem] = []
+    var settingsExpanded = false
 
     func applicationDidFinishLaunching(_ n: Notification) {
         menu.delegate = self
-        hotkeyItem.isEnabled = false
+        // The panel is dark by design; the menu chrome around it must be too,
+        // or the rounded panel floats on a light frosted slab in light mode.
+        menu.appearance = NSAppearance(named: .darkAqua)
+
         menu.addItem(cardItem)
-        menu.addItem(.separator())
-        menu.addItem(toggleItem)
-        menu.addItem(hotkeyItem)
-        menu.addItem(.separator())
-        for i in [autoItem, loginItem, netLogItem, placementItem] { i.target = self; menu.addItem(i) }
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        toggleItem.target = self
+        menu.addItem(dividerItem())
+        attach(toggleItem, toggleRow) { [weak self] in self?.toggle() }
+        menu.addItem(dividerItem())
+        attach(settingsItem, settingsRow) { [weak self] in self?.toggleSettings() }
+        drawerItems.append(passiveItem(PanelLabel(text: "Startup")))
+        attach(autoItem, autoRow) { [weak self] in self?.toggleAuto() }
+        attach(loginItem, loginRow) { [weak self] in self?.toggleLogin() }
+        drawerItems.append(passiveItem(PanelLabel(text: "Tools")))
+        attach(netLogItem, netLogRow) { [weak self] in self?.openNetLog() }
+        attach(placementItem, placementRow) { [weak self] in self?.fixPlacement() }
+        drawerItems.append(contentsOf: [autoItem, loginItem, netLogItem, placementItem])
+        drawerItems.append(passiveItem(Color.clear.frame(width: Ink.panelWidth, height: 6).panelSlice(.middle)))
+        setDrawer(expanded: false)
+        menu.addItem(dividerItem())
+        attach(quitItem, quitRow) { NSApp.terminate(nil) }
 
         makeStatusItem(preferred: UserDefaults.standard.object(forKey: Self.lastGoodKey) as? Double)
 
@@ -483,8 +783,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // including a real network probe, since a menu the user just opened is the
     // one moment the 8.5s worst case is worth paying for. The menu updates in
     // place when it lands.
+    private func attach(_ item: NSMenuItem, _ model: PanelRowModel, onClick: @escaping () -> Void) {
+        if item.action != #selector(NSApplication.terminate(_:)) { item.target = self }
+        item.view = PanelRowHostView(model: model, onClick: onClick)
+        menu.addItem(item)
+    }
+
+    private func dividerItem() -> NSMenuItem { passiveItem(PanelDivider()) }
+
+    // A non-interactive slice of the panel (divider, group label), added to the
+    // menu in order. Kept disabled so keyboard navigation skips it.
+    private func passiveItem<V: View>(_ view: V) -> NSMenuItem {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.view = PanelRowHostView.passive(view)
+        item.isEnabled = false
+        menu.addItem(item)
+        return item
+    }
+
+    @objc func toggleSettings() { setDrawer(expanded: !settingsExpanded) }
+
+    func setDrawer(expanded: Bool) {
+        settingsExpanded = expanded
+        settingsRow.expanded = expanded
+        for item in drawerItems { item.isHidden = !expanded }
+    }
+
+    // Open to the summary every time; a drawer that remembers being open is a
+    // wall of controls again. The one exception is a fault the user must act
+    // on: if the icon is lost behind the notch, open straight to the fix.
+    func menuDidClose(_ menu: NSMenu) {
+        setDrawer(expanded: false)
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
         applyState()
+        if iconHidden { setDrawer(expanded: true) }
         refresh(probeNet: true)
     }
 
@@ -515,20 +849,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateStatusCard()
 
         placementItem.title = iconHidden
-            ? "⚠︎ Icon is behind the notch — try to move it"
+            ? "Icon is behind the notch — try to move it"
             : "Move icon out of the notch"
+        placementRow.title = placementItem.title
+        placementRow.symbol = iconHidden ? "exclamationmark.triangle.fill" : "arrow.left.to.line"
+        placementRow.warning = iconHidden
+        settingsRow.warning = iconHidden
+        settingsRow.symbol = iconHidden ? "exclamationmark.triangle.fill" : "gearshape.fill"
+        settingsRow.subtitle = iconHidden ? "Icon is behind the notch — fix below" : "Startup · Wi-Fi log · icon placement"
 
         toggleItem.title = state.on ? "Turn Off Work Window" : "Turn On Work Window"
-        hotkeyItem.title = "Hotkey: \(hotkeyLabel)"
-        autoItem.state = UserDefaults.standard.bool(forKey: kAutoEnable) ? .on : .off
-        loginItem.state = FileManager.default.fileExists(atPath: agentPlist) ? .on : .off
+        toggleRow.title = state.on ? "Turn off work window" : "Turn on work window"
+        toggleRow.symbol = state.on ? "moon.zzz.fill" : "cup.and.saucer.fill"
+        toggleRow.subtitle = "Hotkey \(hotkeyLabel)"
+
+        let autoOn = UserDefaults.standard.bool(forKey: kAutoEnable)
+        let loginOn = FileManager.default.fileExists(atPath: agentPlist)
+        autoItem.state = autoOn ? .on : .off
+        loginItem.state = loginOn ? .on : .off
+        autoRow.checked = autoOn
+        loginRow.checked = loginOn
     }
 
     func updateStatusCard() {
         let view = WorkWindowCard(state: state) { [weak self] in self?.toggle() }
             .environment(\.colorScheme, .dark)
         let host = NSHostingView(rootView: view)
-        host.frame = NSRect(x: 0, y: 0, width: 408, height: 282)
+        host.frame = NSRect(origin: .zero, size: host.fittingSize)
         cardItem.view = host
     }
 
@@ -711,6 +1058,7 @@ let previewState = State(
     power: "AC 100%",
     net: "online",
     netOK: true,
+    carrier: "Wi-Fi",
     guarded: true,
     guardian: "running",
     autoOff: "5h 42m",
@@ -720,11 +1068,40 @@ let previewState = State(
     claude: AgentCounts(active: 2, idle: 1, completed: 0),
     codex: AgentCounts(active: 3, idle: 0, completed: 1)
 )
-private let previewHost = NSHostingView(
-    rootView: WorkWindowCard(state: previewState, onToggle: {})
-        .environment(\.colorScheme, .dark)
-)
-previewHost.frame = NSRect(x: 0, y: 0, width: 432, height: 318)
+private let previewExpanded = ProcessInfo.processInfo.environment["VIBECAF_CARD_PREVIEW_EXPANDED"] == "1"
+private let previewRows: [PanelRowModel] = [
+    PanelRowModel(symbol: "moon.zzz.fill", title: "Turn off work window", subtitle: "Hotkey ⌃⌥A", shortcut: "⌘A"),
+    PanelRowModel(symbol: "gearshape.fill", title: "Settings", subtitle: "Startup · Wi-Fi log · icon placement", expanded: previewExpanded),
+    PanelRowModel(symbol: "sunrise.fill", title: "Enable awake mode at login", checked: true, nested: true),
+    PanelRowModel(symbol: "menubar.rectangle", title: "Show in menu bar at login", checked: false, nested: true),
+    PanelRowModel(symbol: "doc.text.magnifyingglass", title: "Open Wi-Fi watchdog log", shortcut: "↗", nested: true),
+    PanelRowModel(symbol: "arrow.left.to.line", title: "Move icon out of the notch", nested: true),
+    PanelRowModel(symbol: "xmark.square.fill", title: "Quit Closed-Lid Awake", shortcut: "⌘Q", slice: .bottom),
+]
+previewRows[previewExpanded ? 4 : 1].highlighted = true
+private let previewPanel = VStack(spacing: 0) {
+    WorkWindowCard(state: previewState, onToggle: {})
+    PanelDivider()
+    PanelRow(model: previewRows[0])
+    PanelDivider()
+    PanelRow(model: previewRows[1])
+    if previewExpanded {
+        PanelLabel(text: "Startup")
+        PanelRow(model: previewRows[2])
+        PanelRow(model: previewRows[3])
+        PanelLabel(text: "Tools")
+        PanelRow(model: previewRows[4])
+        PanelRow(model: previewRows[5])
+        Color.clear.frame(width: Ink.panelWidth, height: 6).panelSlice(.middle)
+    }
+    PanelDivider()
+    PanelRow(model: previewRows[6])
+}
+.padding(12)
+.background(Color(red: 0.16, green: 0.17, blue: 0.2))
+.environment(\.colorScheme, .dark)
+private let previewHost = NSHostingView(rootView: previewPanel)
+previewHost.frame = NSRect(origin: .zero, size: previewHost.fittingSize)
 previewHost.layoutSubtreeIfNeeded()
 if let output = ProcessInfo.processInfo.environment["VIBECAF_CARD_PREVIEW_PATH"],
    let bitmap = previewHost.bitmapImageRepForCachingDisplay(in: previewHost.bounds) {
@@ -732,7 +1109,7 @@ if let output = ProcessInfo.processInfo.environment["VIBECAF_CARD_PREVIEW_PATH"]
     try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: output))
 } else {
     let previewWindow = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 432, height: 282),
+        contentRect: previewHost.bounds,
         styleMask: [.titled, .closable],
         backing: .buffered,
         defer: false
