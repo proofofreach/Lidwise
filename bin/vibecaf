@@ -342,7 +342,12 @@ goal_refresh() {
       next=stopped; message="process stopped"
     elif [ "$stale_after" -gt 0 ] 2>/dev/null; then
       last=$(goal_activity_time "$dir"); now=$(date +%s); age=$((now - last))
-      if [ "$age" -ge "$stale_after" ]; then
+      # Strictly greater, not >=: mtime and date +%s are whole seconds, so a
+      # file touched a moment ago can already compute age=1. With >= that made
+      # stale-after 1 flag activity from <1s ago as a stall (flaky in
+      # test-vibecaf-goal-monitoring). Tolerating one extra second is safe;
+      # a false "stalled" alert is not.
+      if [ "$age" -gt "$stale_after" ]; then
         next=stalled; message="no activity for ${age}s"
       else
         next=active; message=""
