@@ -613,14 +613,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         attach(toggleItem, toggleRow) { [weak self] in self?.toggle() }
         menu.addItem(dividerItem())
         attach(settingsItem, settingsRow) { [weak self] in self?.toggleSettings() }
-        drawerItems.append(passiveItem(PanelLabel(text: "Startup")))
+        addDrawerItem(passiveItem(PanelLabel(text: "Startup")))
         attach(autoItem, autoRow) { [weak self] in self?.toggleAuto() }
         attach(loginItem, loginRow) { [weak self] in self?.toggleLogin() }
-        drawerItems.append(passiveItem(PanelLabel(text: "Tools")))
+        addDrawerItem(passiveItem(PanelLabel(text: "Tools")))
         attach(netLogItem, netLogRow) { [weak self] in self?.openNetLog() }
         attach(placementItem, placementRow) { [weak self] in self?.fixPlacement() }
         drawerItems.append(contentsOf: [autoItem, loginItem, netLogItem, placementItem])
-        drawerItems.append(passiveItem(Color.clear.frame(width: Ink.panelWidth, height: 6).panelSlice(.middle)))
+        addDrawerItem(passiveItem(Color.clear.frame(width: Ink.panelWidth, height: 6).panelSlice(.middle)))
         setDrawer(expanded: false)
         menu.addItem(dividerItem())
         attach(quitItem, quitRow) { NSApp.terminate(nil) }
@@ -791,14 +791,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func dividerItem() -> NSMenuItem { passiveItem(PanelDivider()) }
 
-    // A non-interactive slice of the panel (divider, group label), added to the
-    // menu in order. Kept disabled so keyboard navigation skips it.
+    // A non-interactive slice of the panel (divider, group label). Kept
+    // disabled so keyboard navigation skips it. The caller adds it to the menu.
     private func passiveItem<V: View>(_ view: V) -> NSMenuItem {
         let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         item.view = PanelRowHostView.passive(view)
         item.isEnabled = false
-        menu.addItem(item)
         return item
+    }
+
+    private func addDrawerItem(_ item: NSMenuItem) {
+        menu.addItem(item)
+        drawerItems.append(item)
     }
 
     @objc func toggleSettings() { setDrawer(expanded: !settingsExpanded) }
@@ -817,8 +821,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        setDrawer(expanded: iconHidden)
         applyState()
-        if iconHidden { setDrawer(expanded: true) }
         refresh(probeNet: true)
     }
 

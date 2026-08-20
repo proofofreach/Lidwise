@@ -9,6 +9,11 @@
 - Restyled the whole menu as one dark panel: every action row now shares the
   card's palette, with icons, hover and keyboard highlight, check indicators,
   and shortcut glyphs; native key equivalents and accessibility are kept.
+- Reorganised the menu around progressive disclosure: it opens to the card,
+  the primary toggle, and Quit; startup options and tools live in an in-panel
+  Settings drawer that expands in place and reopens collapsed. Check rows
+  flip without closing the menu. If the icon is lost behind the notch, the
+  menu opens with the drawer expanded and the fix highlighted.
 - Agent discovery no longer counts MCP servers (`codex mcp-server`,
   `claude mcp serve`) or crash-reporter helpers as connected sessions, which
   produced a phantom "1 idle" Codex entry.
