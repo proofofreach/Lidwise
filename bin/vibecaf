@@ -39,6 +39,10 @@ NETSTATEFILE="$RUNTIME_DIR/vibecaf-net-state.$(id -u)"
 AGENT_RUNTIME_DIR="$RUNTIME_DIR/vibecaf-agent-state.$(id -u)"
 AGENTSTATEFILE="$AGENT_RUNTIME_DIR/sessions.tsv"
 AGENT_CACHE_MAX_AGE=${VIBECAF_AGENT_CACHE_MAX_AGE:-120}
+# Agent state transitions are tracked for the awake-mode guard and the menu
+# summary either way; the per-transition notification is chatter (it fires on
+# every Codex/Claude run), so it is opt-in.
+AGENT_NOTIFY=${VIBECAF_AGENT_NOTIFY:-0}
 NETLOG="$HOME/Library/Logs/vibecaf-net.log"
 
 # -i idle system sleep, -m disk idle sleep, -s system sleep while on AC.
@@ -475,6 +479,7 @@ agents_refresh() {
 
     [ "$previous" = "unknown" ] && continue
     [ "$previous" = "$state" ] && continue
+    [ "$AGENT_NOTIFY" = "1" ] || continue
     display=$(agent_provider_name "$provider")
     case "$state:$previous" in
       active:completed) title="Agent active"; body="$display session restarted" ;;

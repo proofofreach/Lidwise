@@ -13,6 +13,8 @@ export VIBECAF_CLAUDE_SESSIONS="$TEST_ROOT/claude"
 export VIBECAF_CODEX_SESSIONS="$TEST_ROOT/codex"
 export VIBECAF_AGENT_ACTIVE_WITHIN=90
 export VIBECAF_AGENT_RECENT_WITHIN=21600
+# Transition notifications are opt-in; this test asserts on them.
+export VIBECAF_AGENT_NOTIFY=1
 
 mkdir -p "$VIBECAF_RUNTIME_DIR" \
   "$VIBECAF_CLAUDE_SESSIONS/project-one" \
