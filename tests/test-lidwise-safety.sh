@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/vibecaf-safety.XXXXXX")
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-safety.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 export VIBECAF_RUNTIME_DIR="$TEST_ROOT/run"
@@ -46,7 +46,7 @@ exit 1
 MOCK
 chmod 0755 "$VIBECAF_PMSET" "$VIBECAF_SUDO" "$VIBECAF_THERMAL_STATE_CMD" "$VIBECAF_LAUNCHCTL"
 
-VIBECAF="$ROOT/bin/vibecaf"
+VIBECAF="$ROOT/bin/lidwise"
 
 printf '0\n' > "$MOCK_PMSET_STATE"
 printf 'nominal\n' > "$MOCK_THERMAL_STATE"

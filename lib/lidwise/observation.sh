@@ -1,5 +1,5 @@
 #!/bin/bash
-# Optional work observation. Sourced by vibecaf.
+# Optional work observation. Sourced by lidwise.
 
 # ── goal registry ────────────────────────────────────────────────────────────
 #
@@ -114,7 +114,7 @@ goal_refresh() {
       # Strictly greater, not >=: mtime and date +%s are whole seconds, so a
       # file touched a moment ago can already compute age=1. With >= that made
       # stale-after 1 flag activity from <1s ago as a stall (flaky in
-      # test-vibecaf-goal-monitoring). Tolerating one extra second is safe;
+      # test-lidwise-goal-monitoring). Tolerating one extra second is safe;
       # a false "stalled" alert is not.
       if [ "$age" -gt "$stale_after" ]; then
         next=stalled; message="no activity for ${age}s"
@@ -202,7 +202,7 @@ goal_command() {
     complete) goal_transition completed "${1:-}" "${2:-}" ;;
     fail) goal_transition failed "${1:-}" "${2:-}" ;;
     remove) goal_remove "${1:-}" ;;
-    *) echo "usage: vibecaf goal <add|restart|touch|complete|fail|remove> <name> [options]" >&2; return 2 ;;
+    *) echo "usage: lidwise goal <add|restart|touch|complete|fail|remove> <name> [options]" >&2; return 2 ;;
   esac
 }
 
@@ -223,32 +223,62 @@ agent_record_dir() {
 }
 
 AGENT_RECORD_MAX_AGE=${VIBECAF_AGENT_RECORD_MAX_AGE:-604800}
+AGENT_RECORD_MAX=${VIBECAF_AGENT_RECORD_MAX:-512}
 OBSERVATION_EVERY=${VIBECAF_OBSERVATION_EVERY:-60}
 OBSERVATION_MAX_TICKS=${VIBECAF_OBSERVATION_MAX_TICKS:-0}
 
 agent_valid_state() {
-  case "$1" in working|quiet|finished) return 0 ;; *) return 1 ;; esac
+  case "$1" in working|waiting|quiet|finished|failed) return 0 ;; *) return 1 ;; esac
 }
 
 agent_valid_age() {
   case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
 }
 
+agent_valid_session() {
+  [ -n "$1" ] && [ "${#1}" -le 1024 ] || return 1
+  case "$1" in *$'\n'*|*$'\t'*) return 1 ;; esac
+}
+
+agent_private_dir() {
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  [ "$(stat -f %u "$1" 2>/dev/null)" = "$(id -u)" ] || return 1
+  case "$(stat -f %Lp "$1" 2>/dev/null)" in 700|500) return 0 ;; *) return 1 ;; esac
+}
+
+agent_private_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  [ "$(stat -f %u "$1" 2>/dev/null)" = "$(id -u)" ] || return 1
+  [ "$(stat -f %Lp "$1" 2>/dev/null)" = 600 ] || return 1
+  [ "$(stat -f %z "$1" 2>/dev/null || echo 999999)" -le 262144 ] 2>/dev/null
+}
+
 agents_prepare_runtime() {
-  mkdir -p "$RUNTIME_DIR" || return 1
+  [ ! -L "$RUNTIME_DIR" ] || return 1
+  if [ ! -d "$RUNTIME_DIR" ]; then mkdir -m 700 "$RUNTIME_DIR" || return 1; fi
+  chmod 700 "$RUNTIME_DIR" || return 1
+  agent_private_dir "$RUNTIME_DIR" || return 1
   [ ! -L "$AGENT_RUNTIME_DIR" ] || return 1
   if [ ! -d "$AGENT_RUNTIME_DIR" ]; then
     mkdir -m 700 "$AGENT_RUNTIME_DIR" || return 1
   fi
   chmod 700 "$AGENT_RUNTIME_DIR" || return 1
+  agent_private_dir "$AGENT_RUNTIME_DIR" || return 1
+  if [ -e "$AGENTSTATEFILE" ]; then
+    [ -f "$AGENTSTATEFILE" ] && [ ! -L "$AGENTSTATEFILE" ] || return 1
+    [ "$(stat -f %u "$AGENTSTATEFILE" 2>/dev/null)" = "$(id -u)" ] || return 1
+    chmod 600 "$AGENTSTATEFILE" || return 1
+  fi
 }
 
 agents_refresh() {
-  local tmp provider session state age dir previous display title body now
+  local tmp provider session state age dir previous display title body now record_count
   agents_prepare_runtime || return 1
   [ -x "$AGENT_SCAN_CMD" ] || { rm -f "$AGENTSTATEFILE"; return 1; }
   mkdir -p "$AGENTS_DIR"
   chmod 700 "$AGENTS_DIR" 2>/dev/null || true
+  agent_private_dir "$AGENTS_DIR" || return 1
+  record_count=$(find "$AGENTS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -n '1,513p' | wc -l | tr -d ' ')
   tmp=$(/usr/bin/mktemp "$AGENTSTATEFILE.XXXXXX") || return 1
   chmod 600 "$tmp"
   if ! "$AGENT_SCAN_CMD" > "$tmp"; then
@@ -261,11 +291,13 @@ agents_refresh() {
     agent_valid_state "$state" || continue
     agent_valid_age "$age" || continue
     case "$provider:$state" in
-      claude:working|claude:quiet|claude:finished|codex:working|codex:quiet|codex:finished) ;;
+      claude:working|claude:waiting|claude:quiet|claude:finished|claude:failed|codex:working|codex:waiting|codex:quiet|codex:finished|codex:failed) ;;
       *) continue ;;
     esac
-    [ -n "$session" ] || continue
+    agent_valid_session "$session" || continue
     dir=$(agent_record_dir "$provider" "$session")
+    if [ ! -d "$dir" ] && [ "$record_count" -ge "$AGENT_RECORD_MAX" ] 2>/dev/null; then continue; fi
+    if [ ! -d "$dir" ]; then record_count=$((record_count + 1)); fi
     previous=$(read_field "$dir" state unknown)
     write_field "$dir" provider "$provider"
     write_field "$dir" session "$session"
@@ -280,13 +312,16 @@ agents_refresh() {
     case "$state:$previous" in
       working:finished) title="Agent working"; body="$display session restarted" ;;
       working:*) title="Agent working"; body="$display session resumed" ;;
+      waiting:*) title="Agent needs attention"; body="$display session is waiting" ;;
       quiet:*) title="Agent quiet"; body="$display session is quiet" ;;
       finished:*) title="Agent finished"; body="$display session reported completion" ;;
+      failed:*) title="Agent failed"; body="$display session reported a failure" ;;
     esac
     notify_event "$title" "$body"
   done < "$tmp"
 
   mv "$tmp" "$AGENTSTATEFILE"
+  chmod 600 "$AGENTSTATEFILE"
   agents_prune
 }
 
@@ -307,7 +342,7 @@ agents_prune() {
 agents_cache_current() {
   local modified now age max_age=${1:-$AGENT_CACHE_MAX_AGE}
   agents_prepare_runtime || return 1
-  if [ -f "$AGENTSTATEFILE" ]; then
+  if agent_private_file "$AGENTSTATEFILE"; then
     modified=$(stat -f %m "$AGENTSTATEFILE" 2>/dev/null || echo 0)
     now=$(date +%s)
     agent_valid_age "$modified" || modified=0
@@ -322,35 +357,36 @@ agents_ensure_cache() {
 }
 
 agents_summary() {
-  local provider state session age cw=0 cq=0 cf=0 xw=0 xq=0 xf=0
+  local provider state session age cw=0 cwait=0 cq=0 cf=0 cfail=0 xw=0 xwait=0 xq=0 xf=0 xfail=0
   if agents_ensure_cache && [ -f "$AGENTSTATEFILE" ]; then
     while IFS=$'\t' read -r provider session state age; do
       agent_valid_age "$age" || continue
       case "$provider:$state" in
-        claude:working) cw=$((cw + 1)) ;; claude:quiet) cq=$((cq + 1)) ;;
-        claude:finished) cf=$((cf + 1)) ;; codex:working) xw=$((xw + 1)) ;;
-        codex:quiet) xq=$((xq + 1)) ;; codex:finished) xf=$((xf + 1)) ;;
+        claude:working) cw=$((cw + 1)) ;; claude:waiting) cwait=$((cwait + 1)) ;;
+        claude:quiet) cq=$((cq + 1)) ;; claude:finished) cf=$((cf + 1)) ;; claude:failed) cfail=$((cfail + 1)) ;;
+        codex:working) xw=$((xw + 1)) ;; codex:waiting) xwait=$((xwait + 1)) ;;
+        codex:quiet) xq=$((xq + 1)) ;; codex:finished) xf=$((xf + 1)) ;; codex:failed) xfail=$((xfail + 1)) ;;
       esac
     done < "$AGENTSTATEFILE"
   fi
-  echo "Claude Code: $cw working · $cq quiet · $cf finished"
-  echo "Codex: $xw working · $xq quiet · $xf finished"
-  echo "All agents: $((cw + xw)) working · $((cq + xq)) quiet · $((cf + xf)) finished"
+  echo "Claude Code: $cw working · $cwait waiting · $cq quiet · $cf finished · $cfail failed"
+  echo "Codex: $xw working · $xwait waiting · $xq quiet · $xf finished · $xfail failed"
+  echo "All agents: $((cw + xw)) working · $((cwait + xwait)) waiting · $((cq + xq)) quiet · $((cf + xf)) finished · $((cfail + xfail)) failed"
 }
 
 agents_json() {
-  local provider state session age cw=0 cq=0 cf=0 xw=0 xq=0 xf=0
+  local provider state session age cw=0 cwait=0 cq=0 cf=0 cfail=0 xw=0 xwait=0 xq=0 xf=0 xfail=0
   # Machine status never waits for optional transcript scanning.
   if agents_cache_current && [ -f "$AGENTSTATEFILE" ]; then
     while IFS=$'\t' read -r provider session state age; do
       agent_valid_age "$age" || continue
       case "$provider:$state" in
-        claude:working) cw=$((cw + 1)) ;; claude:quiet) cq=$((cq + 1)) ;; claude:finished) cf=$((cf + 1)) ;;
-        codex:working) xw=$((xw + 1)) ;; codex:quiet) xq=$((xq + 1)) ;; codex:finished) xf=$((xf + 1)) ;;
+        claude:working) cw=$((cw + 1)) ;; claude:waiting) cwait=$((cwait + 1)) ;; claude:quiet) cq=$((cq + 1)) ;; claude:finished) cf=$((cf + 1)) ;; claude:failed) cfail=$((cfail + 1)) ;;
+        codex:working) xw=$((xw + 1)) ;; codex:waiting) xwait=$((xwait + 1)) ;; codex:quiet) xq=$((xq + 1)) ;; codex:finished) xf=$((xf + 1)) ;; codex:failed) xfail=$((xfail + 1)) ;;
       esac
     done < "$AGENTSTATEFILE"
   fi
-  printf '{"claude":{"working":%s,"quiet":%s,"finished":%s},"codex":{"working":%s,"quiet":%s,"finished":%s}}' "$cw" "$cq" "$cf" "$xw" "$xq" "$xf"
+  printf '{"claude":{"working":%s,"waiting":%s,"quiet":%s,"finished":%s,"failed":%s},"codex":{"working":%s,"waiting":%s,"quiet":%s,"finished":%s,"failed":%s}}' "$cw" "$cwait" "$cq" "$cf" "$cfail" "$xw" "$xwait" "$xq" "$xf" "$xfail"
 }
 
 agents_list() {

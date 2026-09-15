@@ -10,9 +10,13 @@ CLA_SUDOERS_DIR=${CLA_SUDOERS_DIR:-/etc/sudoers.d}
 CLA_UID=$(id -u)
 CLA_ACCOUNT=$(id -un)
 case "$CLA_ACCOUNT" in *[!A-Za-z0-9._-]*) echo 'Unsupported account name' >&2; exit 1 ;; esac
-APP_NAME='Closed-Lid Awake.app'
+APP_NAME='Lidwise.app'
 DEST_APP="$CLA_INSTALL_HOME/Applications/$APP_NAME"
-WRAPPER="$CLA_INSTALL_HOME/.local/bin/vibecaf"
+WRAPPER="$CLA_INSTALL_HOME/.local/bin/lidwise"
+OLD_APP="$CLA_INSTALL_HOME/Applications/Closed-Lid Awake.app"
+OLD_WRAPPER="$CLA_INSTALL_HOME/.local/bin/vibecaf"
+PREVIOUS_APP="$DEST_APP"
+if [ ! -e "$DEST_APP" ] && [ -d "$OLD_APP" ]; then PREVIOUS_APP="$OLD_APP"; fi
 LOGIN_LABEL=app.closedlidawake.ClosedLidAwake
 LOGIN_PLIST="$CLA_INSTALL_HOME/Library/LaunchAgents/$LOGIN_LABEL.plist"
 LEGACY_LABEL=app.closedlidawake.guardian
@@ -22,7 +26,8 @@ DAEMON_PLIST="$CLA_DAEMON_DIR/$DAEMON_LABEL.plist"
 RULE="$CLA_SUDOERS_DIR/closed-lid-awake-$CLA_ACCOUNT"
 
 installed_helper() {
-  if [ -x "$DEST_APP/Contents/Resources/vibecaf" ]; then printf '%s\n' "$DEST_APP/Contents/Resources/vibecaf"
+  if [ -x "$DEST_APP/Contents/Resources/lidwise" ]; then printf '%s\n' "$DEST_APP/Contents/Resources/lidwise"
+  elif [ -x "$OLD_APP/Contents/Resources/vibecaf" ]; then printf '%s\n' "$OLD_APP/Contents/Resources/vibecaf"
   elif [ -x "$WRAPPER" ]; then printf '%s\n' "$WRAPPER"
   else return 1; fi
 }
@@ -45,8 +50,8 @@ read_phase() {
 job_loaded() { "$CLA_LAUNCHCTL" print "$1" >/dev/null 2>&1; }
 # Exact executable and user identity; never pkill a substring or trust stored PIDs.
 app_pids() {
-  /bin/ps -axo pid=,uid=,comm= | /usr/bin/awk -v uid="$CLA_UID" -v exe="$DEST_APP/Contents/MacOS/ClosedLidAwake" '
-    $2 == uid { pid=$1; $1=""; $2=""; sub(/^ +/, ""); if ($0 == exe) print pid }'
+  /bin/ps -axo pid=,uid=,comm= | /usr/bin/awk -v uid="$CLA_UID" -v exe="$DEST_APP/Contents/MacOS/Lidwise" -v old="$OLD_APP/Contents/MacOS/ClosedLidAwake" '
+    $2 == uid { pid=$1; $1=""; $2=""; sub(/^ +/, ""); if ($0 == exe || $0 == old) print pid }'
 }
 stop_app() {
   local pid attempt

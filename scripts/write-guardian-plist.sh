@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-[ "$#" -ge 2 ] && [ "$#" -le 3 ] || { echo 'usage: write-guardian-plist.sh <plist-path> <vibecaf-path> [--system]' >&2; exit 2; }
+[ "$#" -ge 2 ] && [ "$#" -le 3 ] || { echo 'usage: write-guardian-plist.sh <plist-path> <lidwise-path> [--system]' >&2; exit 2; }
 PLIST=$1
 VIBECAF=$2
 MODE=${3:-}

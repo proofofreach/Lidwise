@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/vibecaf-agents.XXXXXX")
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-agents.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 export VIBECAF_STATE_DIR="$TEST_ROOT/state"
@@ -40,7 +40,7 @@ printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete"}}' \
 # One connected Claude session has gone quiet; the other files are current.
 touch -A -000500 "$VIBECAF_CLAUDE_SESSIONS/project-two/session-two.jsonl"
 
-VIBECAF="$ROOT/bin/vibecaf"
+VIBECAF="$ROOT/bin/lidwise"
 
 # Completion comes only from valid structured lifecycle records. Silence stays
 # quiet, malformed JSON does not become a false finish, and child traces do not
@@ -59,7 +59,7 @@ touch -A -000601 "$TEST_ROOT/scanner-edge/codex/quiet.jsonl"
 edge=$(VIBECAF_CODEX_SESSIONS="$TEST_ROOT/scanner-edge/codex" \
   VIBECAF_CLAUDE_SESSIONS="$TEST_ROOT/scanner-edge/claude" \
   VIBECAF_AGENT_RECENT_WITHIN=21600 VIBECAF_AGENT_PROCESS_FILE="$TEST_ROOT/missing-processes" \
-  "$ROOT/bin/vibecaf-agent-scan")
+  "$ROOT/bin/lidwise-agent-scan")
 grep -q $'^codex\tspaced\tfinished\t' <<< "$edge"
 grep -q $'^codex\tmalformed\tworking\t' <<< "$edge"
 grep -q $'^codex\tquiet\tquiet\t' <<< "$edge"
@@ -69,9 +69,9 @@ grep -q $'^claude\tfinished\tfinished\t' <<< "$edge"
 "$VIBECAF" agents --refresh >/dev/null
 
 summary=$("$VIBECAF" agents --summary)
-grep -q '^Claude Code: 1 working · 1 quiet · 0 finished$' <<< "$summary"
-grep -q '^Codex: 1 working · 0 quiet · 1 finished$' <<< "$summary"
-grep -q '^All agents: 2 working · 1 quiet · 1 finished$' <<< "$summary"
+grep -q '^Claude Code: 1 working · 0 waiting · 1 quiet · 0 finished · 0 failed$' <<< "$summary"
+grep -q '^Codex: 1 working · 0 waiting · 0 quiet · 1 finished · 0 failed$' <<< "$summary"
+grep -q '^All agents: 2 working · 0 waiting · 1 quiet · 1 finished · 0 failed$' <<< "$summary"
 ! "$VIBECAF" agents | grep -q 'invalid'
 [ ! -e "$VIBECAF_STATE_DIR/session/active" ]
 [ ! -e "$VIBECAF_NOTIFY_LOG" ]
@@ -89,14 +89,14 @@ printf '%s\n' \
 mcp_summary=$(VIBECAF_AGENT_PROCESS_FILE="$TEST_ROOT/mcp-only/processes.txt" \
   VIBECAF_CODEX_SESSIONS="$TEST_ROOT/mcp-only/codex" \
   VIBECAF_CLAUDE_SESSIONS="$TEST_ROOT/mcp-only/claude" \
-  "$ROOT/bin/vibecaf-agent-scan")
+  "$ROOT/bin/lidwise-agent-scan")
 [ -z "$mcp_summary" ]
 # …but a real Codex CLI process still counts as connected.
 printf '%s\n' '205 1 /opt/homebrew/bin/codex' > "$TEST_ROOT/mcp-only/processes.txt"
 mcp_summary=$(VIBECAF_AGENT_PROCESS_FILE="$TEST_ROOT/mcp-only/processes.txt" \
   VIBECAF_CODEX_SESSIONS="$TEST_ROOT/mcp-only/codex" \
   VIBECAF_CLAUDE_SESSIONS="$TEST_ROOT/mcp-only/claude" \
-  "$ROOT/bin/vibecaf-agent-scan")
+  "$ROOT/bin/lidwise-agent-scan")
 grep -q $'^codex\tcodex\tquiet\t0$' <<< "$mcp_summary"
 
 # Per-session freshness, not a provider-global process flag, drives state.
@@ -104,7 +104,7 @@ printf '%s\n' \
   '102 1 /Applications/ChatGPT.app/Contents/Resources/codex app-server --listen stdio://' \
   > "$VIBECAF_AGENT_PROCESS_FILE"
 summary=$("$VIBECAF" agents --summary)
-grep -q '^Claude Code: 1 working · 1 quiet · 0 finished$' <<< "$summary"
+grep -q '^Claude Code: 1 working · 0 waiting · 1 quiet · 0 finished · 0 failed$' <<< "$summary"
 
 # The menu can refresh a stale cache without enabling awake mode or reading pmset.
 cat > "$TEST_ROOT/forbidden-pmset" <<'EOF'
@@ -134,7 +134,7 @@ printf '%s\n' '{"type":"event_msg","payload":{"type":"user_message"}}' \
   >> "$VIBECAF_CODEX_SESSIONS/2026/08/14/restartable.jsonl"
 summary=$("$VIBECAF" agents --summary)
 grep -q $'Agent working\tCodex session restarted' "$VIBECAF_NOTIFY_LOG"
-grep -q '^Codex: 2 working · 0 quiet · 0 finished$' <<< "$summary"
+grep -q '^Codex: 2 working · 0 waiting · 0 quiet · 0 finished · 0 failed$' <<< "$summary"
 [ -e "$VIBECAF_STATE_DIR/session/active" ]
 
 printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete"}}' \
@@ -161,7 +161,7 @@ grep -q '^Claude Code:' <<< "$status"
 # The versioned status contract consumes observer JSON without making observer
 # state part of awake-session ownership.
 status_json=$(VIBECAF_PMSET="$TEST_ROOT/pmset" "$VIBECAF" status --json)
-grep -q '"agents":{"claude":{"working":1,"quiet":1,"finished":0},"codex":{"working":1,"quiet":0,"finished":1}}' <<< "$status_json"
+grep -q '"agents":{"claude":{"working":1,"waiting":0,"quiet":1,"finished":0,"failed":0},"codex":{"working":1,"waiting":0,"quiet":0,"finished":1,"failed":0}}' <<< "$status_json"
 grep -q '"goals":{"active":0,"stalled":0,"completed":0,"failed":0}' <<< "$status_json"
 
 # A missing scanner clears stale data and degrades without a shell error.
@@ -172,8 +172,8 @@ printf '%s\n' $'codex\tstale\tactive\t0' \
 missing=$(VIBECAF_RUNTIME_DIR="$TEST_ROOT/empty-run" \
   VIBECAF_AGENT_SCAN_CMD="$TEST_ROOT/missing-scanner" \
   "$VIBECAF" agents --summary 2>&1)
-grep -q '^Claude Code: 0 working · 0 quiet · 0 finished$' <<< "$missing"
-grep -q '^Codex: 0 working · 0 quiet · 0 finished$' <<< "$missing"
+grep -q '^Claude Code: 0 working · 0 waiting · 0 quiet · 0 finished · 0 failed$' <<< "$missing"
+grep -q '^Codex: 0 working · 0 waiting · 0 quiet · 0 finished · 0 failed$' <<< "$missing"
 
 # A precreated runtime symlink cannot inject a forged cache.
 mkdir -p "$TEST_ROOT/symlink-run" "$TEST_ROOT/forged-agent-state"
@@ -184,6 +184,6 @@ ln -s "$TEST_ROOT/forged-agent-state" \
 forged=$(VIBECAF_RUNTIME_DIR="$TEST_ROOT/symlink-run" \
   VIBECAF_AGENT_SCAN_CMD="$TEST_ROOT/missing-scanner" \
   "$VIBECAF" agents --summary 2>&1)
-grep -q '^Codex: 0 working · 0 quiet · 0 finished$' <<< "$forged"
+grep -q '^Codex: 0 working · 0 waiting · 0 quiet · 0 finished · 0 failed$' <<< "$forged"
 
 echo "automatic agent discovery: ok"

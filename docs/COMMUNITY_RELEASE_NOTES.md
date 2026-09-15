@@ -2,9 +2,14 @@
 
 **Not published. Hardware validation remains pending.**
 
-Closed-Lid Awake adds bounded manual awake sessions, clearer ownership and recovery
+Lidwise adds bounded manual awake sessions, clearer ownership and recovery
 status, duration presets, and optional local Claude Code/Codex activity monitoring.
 Failed commands now refresh actual state, and the menu adapts to longer fault messages.
+
+The candidate also adds explicit session extension, an advance expiry warning,
+saved next-session battery/charging policy, local session history, supported agent
+attention events, and a guided read-only lid test. These additions need their own
+real-device checks; earlier hardware observations do not certify this revision.
 
 This build is free, ad hoc signed and **not notarized by Apple**. No Apple Developer
 membership is required. Download the ZIP and matching `.sha256` file together,

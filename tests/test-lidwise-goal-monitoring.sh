@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/vibecaf-goal-monitor.XXXXXX")
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-goal-monitor.XXXXXX")
 worker_pid=""
 cleanup() {
   [ -z "$worker_pid" ] || kill "$worker_pid" 2>/dev/null || true
@@ -16,7 +16,7 @@ export VIBECAF_STATE_DIR="$TEST_ROOT/state"
 export VIBECAF_NOTIFY_LOG="$TEST_ROOT/notifications.log"
 mkdir -p "$HOME" "$VIBECAF_RUNTIME_DIR" "$VIBECAF_STATE_DIR"
 
-VIBECAF="$ROOT/bin/vibecaf"
+VIBECAF="$ROOT/bin/lidwise"
 
 sleep 30 &
 worker_pid=$!

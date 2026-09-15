@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-HELPER="$ROOT/.build/helpers/vibecaf-agent-scan-core"
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/closedlid-json-events.XXXXXX")
+HELPER="$ROOT/.build/helpers/lidwise-agent-scan-core"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-json-events.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 "$HELPER" --run-bounded 1 /bin/sh -c 'printf stdout; printf stderr >&2; exit 7' \
   > "$WORK/bounded.stdout" 2> "$WORK/bounded.stderr" && exit 1

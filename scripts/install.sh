@@ -10,17 +10,20 @@ case "${1:-}" in --without-sudoers) with_sudoers=0 ;; '') ;; *) echo 'usage: ins
 SOURCE_APP=${CLA_SOURCE_APP:-"$ROOT/dist/$APP_NAME"}
 [ -d "$SOURCE_APP" ] || SOURCE_APP="$ROOT/$APP_NAME"
 [ -d "$SOURCE_APP" ] || { echo 'Build or extract the release before installing.' >&2; exit 1; }
+if [ -e "$DEST_APP" ] && [ -e "$OLD_APP" ]; then
+  echo 'Both Lidwise and Closed-Lid Awake are installed. Resolve the duplicate before upgrading.' >&2; exit 1
+fi
 # The candidate helper holds the shared mutation lock throughout staging/upgrade.
 # The script child only reads power state; it never invokes a mutating CLI command.
 if [ "${CLA_MAINTENANCE_ACTIVE:-0}" != 1 ]; then
-  exec "$SOURCE_APP/Contents/Resources/vibecaf" __maintenance -- \
+  exec "$SOURCE_APP/Contents/Resources/lidwise" __maintenance -- \
     /usr/bin/env CLA_MAINTENANCE_ACTIVE=1 /bin/bash "$0" "$@"
 fi
 helper=$(installed_helper || true)
 phase=$(read_phase "$helper")
 [ "$phase" = off ] || { echo "Installation requires verified normal sleep (current state: $phase). Turn awake mode off first." >&2; exit 1; }
 mkdir -p "$CLA_INSTALL_HOME/Applications" "$CLA_INSTALL_HOME/.local/bin" "$CLA_INSTALL_HOME/Library/LaunchAgents"
-WORK=$(mktemp -d "$CLA_INSTALL_HOME/Applications/.closedlid-install.XXXXXX")
+WORK=$(mktemp -d "$CLA_INSTALL_HOME/Applications/.lidwise-install.XXXXXX")
 chmod 0700 "$WORK"
 mutated=0; committed=0; app_saved=0; new_app=0; rule_changed=0; daemon_changed=0; legacy_rule_changed=0
 login_loaded=0; legacy_loaded=0; daemon_loaded=0; app_running=0
@@ -38,9 +41,11 @@ cleanup() {
       "$CLA_SUDO" "$CLA_LAUNCHCTL" bootout "system/$DAEMON_LABEL" || rollback_failed=1
     fi
     if [ "$new_app" -eq 1 ]; then rm -rf "$DEST_APP" || rollback_failed=1; fi
-    if [ "$app_saved" -eq 1 ]; then mv "$WORK/previous.app" "$DEST_APP" || rollback_failed=1; fi
+    if [ "$app_saved" -eq 1 ]; then mv "$WORK/previous.app" "$PREVIOUS_APP" || rollback_failed=1; fi
     if [ -e "$WORK/wrapper" ]; then cp -p "$WORK/wrapper" "$WRAPPER" || rollback_failed=1
     else rm -f "$WRAPPER" || rollback_failed=1; fi
+    if [ -e "$WORK/old-wrapper" ]; then cp -p "$WORK/old-wrapper" "$OLD_WRAPPER" || rollback_failed=1; fi
+    if [ -e "$WORK/login.plist" ]; then cp -p "$WORK/login.plist" "$LOGIN_PLIST" || rollback_failed=1; fi
     if [ "$rule_changed" -eq 1 ]; then
       if [ -e "$WORK/rule" ]; then "$CLA_SUDO" /usr/bin/install -o root -g wheel -m 0440 "$WORK/rule" "$RULE" || rollback_failed=1
       else "$CLA_SUDO" /bin/rm -f "$RULE" || rollback_failed=1; fi
@@ -55,7 +60,7 @@ cleanup() {
     if [ "$daemon_loaded" -eq 1 ]; then "$CLA_SUDO" "$CLA_LAUNCHCTL" bootstrap system "$DAEMON_PLIST" || rollback_failed=1; fi
     if [ "$legacy_loaded" -eq 1 ]; then "$CLA_LAUNCHCTL" bootstrap "gui/$CLA_UID" "$LEGACY_PLIST" || rollback_failed=1; fi
     if [ "$login_loaded" -eq 1 ]; then "$CLA_LAUNCHCTL" bootstrap "gui/$CLA_UID" "$LOGIN_PLIST" || rollback_failed=1; fi
-    if [ "$app_running" -eq 1 ] && [ "$login_loaded" -eq 0 ]; then /usr/bin/open "$DEST_APP" || rollback_failed=1; fi
+    if [ "$app_running" -eq 1 ] && [ "$login_loaded" -eq 0 ]; then /usr/bin/open "$PREVIOUS_APP" || rollback_failed=1; fi
   fi
   if [ "$rollback_failed" -eq 1 ]; then
     echo "Rollback was incomplete. Recovery backups are retained at: $WORK" >&2
@@ -68,16 +73,22 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+echo 'Checking the app and its required helpers…'
 "$CLA_DITTO" "$SOURCE_APP" "$WORK/new.app"
-for file in Contents/MacOS/ClosedLidAwake Contents/Resources/vibecaf Contents/Resources/vibecaf-agent-scan Contents/Helpers/vibecaf-thermal Contents/Helpers/vibecaf-agent-scan-core; do
+for file in Contents/MacOS/Lidwise Contents/Resources/lidwise Contents/Resources/lidwise-agent-scan Contents/Helpers/lidwise-thermal Contents/Helpers/lidwise-agent-scan-core Contents/Helpers/lidwise-lid-probe; do
   [ -x "$WORK/new.app/$file" ] || { echo "Incomplete app: $file" >&2; exit 1; }
 done
-for module in session network observation; do
-  [ -f "$WORK/new.app/Contents/Resources/lib/vibecaf/$module.sh" ] || { echo "Missing helper module: $module" >&2; exit 1; }
+for module in session network observation history; do
+  [ -f "$WORK/new.app/Contents/Resources/lib/lidwise/$module.sh" ] || { echo "Missing helper module: $module" >&2; exit 1; }
 done
 /usr/bin/codesign --verify --deep --strict "$WORK/new.app"
 [ ! -e "$WRAPPER" ] || cp -p "$WRAPPER" "$WORK/wrapper"
+[ ! -e "$LOGIN_PLIST" ] || cp -p "$LOGIN_PLIST" "$WORK/login.plist"
+if [ "$PREVIOUS_APP" = "$OLD_APP" ] && [ -e "$OLD_WRAPPER" ]; then
+  cp -p "$OLD_WRAPPER" "$WORK/old-wrapper"
+fi
 # Authenticate and validate before stopping the app or removing any safeguards.
+echo 'Administrator approval is needed to install sleep recovery. Password characters are not shown in Terminal.'
 "$CLA_SUDO" -v
 [ ! -e "$RULE" ] || "$CLA_SUDO" /bin/cat "$RULE" > "$WORK/rule"
 [ ! -e "$LEGACY_RULE" ] || "$CLA_SUDO" /bin/cat "$LEGACY_RULE" > "$WORK/legacy-rule"
@@ -86,9 +97,10 @@ if [ "$with_sudoers" -eq 1 ]; then
   printf '%s ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1\n' "$CLA_ACCOUNT" > "$WORK/new-rule"
   "$CLA_SUDO" /usr/sbin/visudo -cf "$WORK/new-rule"
 fi
-CLA_INSTALL_HOME="$CLA_INSTALL_HOME" "$ROOT/scripts/write-guardian-plist.sh" "$WORK/new-daemon.plist" "$DEST_APP/Contents/Resources/vibecaf" --system
+CLA_INSTALL_HOME="$CLA_INSTALL_HOME" "$ROOT/scripts/write-guardian-plist.sh" "$WORK/new-daemon.plist" "$DEST_APP/Contents/Resources/lidwise" --system
 # Recheck after staging/authentication, before any mutation.
 [ "$(read_phase "$helper")" = off ] || { echo 'Power state changed during staging; retry after turning awake mode off.' >&2; exit 1; }
+echo 'Installing Lidwise and preserving your settings…'
 mutated=1
 [ "$login_loaded" -eq 0 ] || "$CLA_LAUNCHCTL" bootout "gui/$CLA_UID/$LOGIN_LABEL"
 stop_app
@@ -97,16 +109,22 @@ stop_app
 [ "$(read_phase "$helper")" = off ] || { echo 'Power state changed while the old app exited; safeguards are retained.' >&2; exit 1; }
 [ "$legacy_loaded" -eq 0 ] || "$CLA_LAUNCHCTL" bootout "gui/$CLA_UID/$LEGACY_LABEL"
 [ "$daemon_loaded" -eq 0 ] || "$CLA_SUDO" "$CLA_LAUNCHCTL" bootout "system/$DAEMON_LABEL"
-if [ -e "$DEST_APP" ]; then mv "$DEST_APP" "$WORK/previous.app"; app_saved=1; fi
+if [ -e "$PREVIOUS_APP" ]; then mv "$PREVIOUS_APP" "$WORK/previous.app"; app_saved=1; fi
 mv "$WORK/new.app" "$DEST_APP"; new_app=1
-printf '#!/bin/bash\nexec %q "$@"\n' "$DEST_APP/Contents/Resources/vibecaf" > "$WORK/new-wrapper"
+printf '#!/bin/bash\nexec %q "$@"\n' "$DEST_APP/Contents/Resources/lidwise" > "$WORK/new-wrapper"
 chmod 0755 "$WORK/new-wrapper"
 mv "$WORK/new-wrapper" "$WRAPPER"
+if [ -e "$WORK/old-wrapper" ]; then cp -p "$WRAPPER" "$OLD_WRAPPER"; fi
+if [ -e "$WORK/login.plist" ]; then
+  /usr/bin/plutil -replace ProgramArguments -json "[]" "$LOGIN_PLIST"
+  /usr/bin/plutil -insert ProgramArguments.0 -string "$DEST_APP/Contents/MacOS/Lidwise" "$LOGIN_PLIST"
+fi
 if [ "$with_sudoers" -eq 1 ]; then
   rule_changed=1
   "$CLA_SUDO" /usr/bin/install -o root -g wheel -m 0440 "$WORK/new-rule" "$RULE"
 fi
 daemon_changed=1
+echo 'Starting independent sleep recovery…'
 "$CLA_SUDO" /usr/bin/install -o root -g wheel -m 0644 "$WORK/new-daemon.plist" "$DAEMON_PLIST"
 "$CLA_SUDO" "$CLA_LAUNCHCTL" bootstrap system "$DAEMON_PLIST"
 job_loaded "system/$DAEMON_LABEL" || { echo 'Guardian did not start' >&2; exit 1; }

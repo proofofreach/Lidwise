@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/vibecaf-core.XXXXXX")
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-core.XXXXXX")
 sleeper=""; orphan=""; activator=""; protected_root=""; protected_child=""
 cleanup() {
   [ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null || true
@@ -88,7 +88,7 @@ chmod 0755 "$TEST_ROOT/bin/"*
 # A live descendant that cannot be signaled is not mistaken for an exited
 # process, and takeover leaves the recorded root alive for a later retry.
 USER_ID=$(id -u); PS=/bin/ps; RUNTIME_DIR=$VIBECAF_RUNTIME_DIR
-source "$ROOT/lib/vibecaf/session.sh"
+source "$ROOT/lib/lidwise/session.sh"
 /bin/bash -c 'sleep 30 & echo "$!" > "$1"; wait' helper "$TEST_ROOT/protected-child" 9>&- & protected_root=$!
 while [ ! -s "$TEST_ROOT/protected-child" ]; do sleep 0.01; done
 protected_child=$(cat "$TEST_ROOT/protected-child")
@@ -105,7 +105,7 @@ builtin kill -TERM "$protected_root" "$protected_child" 2>/dev/null || true
 wait "$protected_root" 2>/dev/null || true
 protected_root=""; protected_child=""
 
-VIBECAF="$ROOT/bin/vibecaf"
+VIBECAF="$ROOT/bin/lidwise"
 printf '0\n' > "$MOCK_PMSET_STATE"
 printf 'nominal\n' > "$MOCK_THERMAL_STATE"
 : > "$MOCK_PMSET_LOG"
@@ -114,7 +114,7 @@ printf 'nominal\n' > "$MOCK_THERMAL_STATE"
 json=$($VIBECAF status --json)
 [ "$(printf '%s' "$json" | /usr/bin/plutil -extract schema_version raw -o - -)" = 1 ]
 normalized=$(printf '%s' "$json" | sed -E 's/"observed_at":[0-9]+/"observed_at":TIME/')
-expected='{"schema_version":1,"phase":"off","session_id":null,"started_at":null,"deadline":null,"remaining_seconds":null,"duration_seconds":21600,"default_duration_seconds":21600,"battery_floor":20,"power_source":"AC","battery_percent":100,"thermal":"nominal","guard_running":false,"guardian_running":true,"recovery_ready":false,"recovery_authorized_at":null,"recovery_authorization_current":false,"issues":[],"network_state":"unknown","network_detail":"Not checked","network_recovery":true,"network_recovery_available":false,"agent_notifications":false,"agents":{"claude":{"working":0,"quiet":0,"finished":0},"codex":{"working":0,"quiet":0,"finished":0}},"goals":{"active":0,"stalled":0,"completed":0,"failed":0},"observed_at":TIME}'
+expected='{"schema_version":1,"phase":"off","session_id":null,"started_at":null,"deadline":null,"remaining_seconds":null,"duration_seconds":21600,"default_duration_seconds":21600,"battery_floor":20,"default_battery_floor":20,"require_ac":false,"default_require_ac":false,"can_extend":false,"power_source":"AC","battery_percent":100,"thermal":"nominal","guard_running":false,"guardian_running":true,"recovery_ready":false,"recovery_authorized_at":null,"recovery_authorization_current":false,"issues":[],"network_state":"unknown","network_detail":"Not checked","network_recovery":true,"network_recovery_available":false,"agent_notifications":false,"agents":{"claude":{"working":0,"waiting":0,"quiet":0,"finished":0,"failed":0},"codex":{"working":0,"waiting":0,"quiet":0,"finished":0,"failed":0}},"goals":{"active":0,"stalled":0,"completed":0,"failed":0},"last_session":null,"observed_at":TIME}'
 [ "$normalized" = "$expected" ]
 
 # Settings persist privately and reject malformed or out-of-range input.
@@ -124,7 +124,7 @@ $VIBECAF config set duration 90 >/dev/null
 $VIBECAF config set recovery off >/dev/null
 $VIBECAF config set notifications on >/dev/null
 config=$($VIBECAF config get --json)
-[ "$config" = '{"schema_version":1,"duration_seconds":90,"network_recovery":false,"agent_notifications":true}' ]
+[ "$config" = '{"schema_version":1,"duration_seconds":90,"battery_floor":20,"require_ac":false,"network_recovery":false,"agent_notifications":true}' ]
 [ "$(stat -f %Lp "$VIBECAF_STATE_DIR/config")" = 700 ]
 [ "$(stat -f %Lp "$VIBECAF_STATE_DIR/config/duration")" = 600 ]
 ! $VIBECAF config set duration 0 >/dev/null 2>&1

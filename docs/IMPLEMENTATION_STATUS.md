@@ -2,6 +2,15 @@
 
 Working record for the 1.2 candidate. **Public launch remains pending verification.**
 
+The table below records the earlier launch-safety revision. The subsequent
+competitor-driven additions have a separate implementation and review record in
+[FEATURE_IMPLEMENTATION.md](FEATURE_IMPLEMENTATION.md); earlier passes do not
+certify that revision.
+
+The feature revision now has its own completed independent reviews, full local
+test run, four-executable universal build and verified community archive. Its
+hardware and clean-download checks remain pending; see that record for scope.
+
 | Area | Implementation and evidence |
 |---|---|
 | Session safety | Transactional ownership, kernel mutation lock, bounded recovery takeover, conservative incomplete-state handling, session-bound health evidence and versioned JSON. Focused core and safety suites passed; final amendments independently endorsed. |
@@ -28,8 +37,9 @@ are still pending.
 Release 1 safety fixes and Release 2 daily-use improvements from the launch review
 are implemented for verification. Scheduled wake, agent-owned sleep, fan control,
 remote displays and a general trigger engine remain explicitly deferred.
-Authenticated-helper migration, signed automatic updates, lifecycle adapters and
-event-driven observation also remain later work.
+Authenticated-helper migration and signed automatic updates remain later work.
+The feature revision adds optional lifecycle adapters while retaining transcript
+observation as a fallback.
 
 ## Review availability
 
@@ -53,9 +63,11 @@ The original launch blockers map to the independent review and test evidence:
 5. Lifecycle: isolated install/rollback/removal tests and nested universal signature
    verification pass. Real launchd/login, manual instances and clean-device install
    remain unverified.
-6. Release reconciliation: the source is committed and the local community candidate
-   is rebuilt from that revision. A public tag and release remain pending hardware
-   evidence; public latest is not claimed to contain these changes.
+6. Release reconciliation: freeze the complete reviewed revision, including the
+   Lidwise rename and feature additions, before producing the final candidate.
+   Verify its embedded source revision and manifest against the committed inputs.
+   A public tag and release remain pending hardware evidence; public latest is
+   not claimed to contain these changes.
 
 Daily-use improvements and documentation are implemented. Live menu keyboard,
 VoiceOver and accessibility settings still require the real-device pass. Optional

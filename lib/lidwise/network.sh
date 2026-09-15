@@ -1,5 +1,5 @@
 #!/bin/bash
-# Read-only network observation. Sourced by vibecaf.
+# Read-only network observation. Sourced by lidwise.
 #
 # This module observes every route. It never changes Wi-Fi radio or IPv4
 # configuration because current macOS exposes no safe lease-renewal operation.
@@ -67,7 +67,7 @@ link_state() { # link_state [wifi BSD device]
       fi
     fi
   fi
-  tmp=$(mktemp "$RUNTIME_DIR/vibecaf-probe.XXXXXX" 2>/dev/null) || tmp=""
+  tmp=$(mktemp "$RUNTIME_DIR/lidwise-probe.XXXXXX" 2>/dev/null) || tmp=""
   code=$("$CURL" -s -o "${tmp:-/dev/null}" -w '%{http_code}' --max-time 6 "$PROBE_URL" 2>/dev/null) || code=000
   if [ -n "$tmp" ]; then body=$(cat "$tmp" 2>/dev/null); rm -f "$tmp"; else body=""; fi
   case "$body" in *Success*) echo online ;; *) case "$code" in ''|000) echo deadlink ;; *) echo portal ;; esac ;; esac

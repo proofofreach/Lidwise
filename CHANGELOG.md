@@ -2,6 +2,17 @@
 
 ## 1.2.0 — unreleased community candidate
 
+- Renamed the app, CLI, source files, documentation, and release packages to Lidwise.
+  Upgrade installation migrates the old app and login path with rollback support.
+  Existing settings and recovery identifiers remain compatible.
+
+- Add explicit bounded session extension and an advance expiry warning.
+- Save next-session battery and charging-only policy; retain active session policy.
+- Record a bounded local session history with reasons and restoration results.
+- Add supported explicit agent attention/failure events and reversible adapter setup.
+- Add guided read-only lid verification with a native measurement helper.
+- Explain installation progress and the administrator authorization step.
+
 - Consolidate network, agent and goal monitoring into one optional session worker;
   bound activity scans and preserve independent sleep recovery.
 - Refresh agent activity while awake mode is off, without delaying power controls.

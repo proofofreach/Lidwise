@@ -6,10 +6,10 @@ unknown states. A default route through Ethernet or a VPN is not treated as a
 Wi-Fi failure.
 
 ```bash
-vibecaf netdiag
-vibecaf netlog
-vibecaf config set recovery off
-vibecaf config set recovery on
+lidwise netdiag
+lidwise netlog
+lidwise config set recovery off
+lidwise config set recovery on
 ```
 
 `recovery` is the compatibility name of the stored monitoring setting. This

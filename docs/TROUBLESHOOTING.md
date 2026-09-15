@@ -2,7 +2,7 @@
 
 ## Setup or activation failed
 
-Use **Check setup** or `vibecaf doctor`. The app needs a working thermal helper,
+Use **Check setup** or `lidwise doctor`. The app needs a working thermal helper,
 a running guardian, and durable permission to restore sleep without an interactive
 authentication dialog. A recently cached `sudo` password is not sufficient.
 Reinstall from the verified release to repair setup after turning awake mode off.
@@ -12,9 +12,9 @@ If status is unknown, keep the lid open until the cause is resolved.
 
 ## Sleep did not return
 
-Run `vibecaf status --json`. If the session is owned by this app, run `vibecaf off`.
+Run `lidwise status --json`. If the session is owned by this app, run `lidwise off`.
 A failed off keeps recovery in place. An external hold belongs to another tool;
-turn that tool off first. `vibecaf off --force` is an explicit global override.
+turn that tool off first. `lidwise off --force` is an explicit global override.
 Other `caffeinate` assertions or macOS settings can still prevent some forms of sleep.
 
 Do not delete the app, permission rule, or recovery state while restoration is failing.
@@ -32,7 +32,7 @@ Use the agent or job's own terminal to verify its state. Notifications are opt-i
 
 ## Network is unavailable
 
-Use `vibecaf netdiag` and the [network guide](NETWORK.md). The app does not restore
+Use `lidwise netdiag` and the [network guide](NETWORK.md). The app does not restore
 DHCP by overwriting network configuration and does not turn Wi-Fi back on for you.
 
 ## Before reporting a bug

@@ -1,4 +1,4 @@
-# Closed-Lid Awake: launch review
+# Lidwise: launch review
 
 Date: 2026-09-15. Reviewed working tree at `acd5cdc`, including the existing uncommitted agent-scanner fix.
 
@@ -17,7 +17,7 @@ This review does not change the installed app, system sleep settings, networking
 - `./scripts/check.sh`: **PASS**. All seven shell suites pass; all three Swift sources typecheck; universal app and thermal helper build; bundle signature verification and plist validation pass.
 - Build host: Apple Silicon, macOS 26.6.2. Intel binaries compile; Intel execution and macOS 13 behavior were not tested.
 - Current local bundle: ad hoc signature. `spctl --assess --type execute --verbose=2` rejects it. One valid local code-signing identity exists; its suitability for Developer ID distribution and notarization credentials were not established.
-- Rendered and inspected the existing collapsed and expanded `CARD_PREVIEW` views and a synthetic low-battery/network/guard-fault state. These are synthetic view renders, not a live NSMenu, keyboard, VoiceOver, or fresh-install test. The computer-use app inventory did not expose Closed-Lid Awake.
+- Rendered and inspected the existing collapsed and expanded `CARD_PREVIEW` views and a synthetic low-battery/network/guard-fault state. These are synthetic view renders, not a live NSMenu, keyboard, VoiceOver, or fresh-install test. The computer-use app inventory did not expose Lidwise.
 - Ran additional isolated probes using the actual shell functions and actual Swift status parser with fake inputs. No real power/network writes occurred. Results appear below.
 - Read current competitor documentation and public release metadata. Competitor features are documented claims unless explicitly stated otherwise; competitor apps were not installed or independently hardware-tested.
 
@@ -25,7 +25,7 @@ This review does not change the installed app, system sleep settings, networking
 
 ### 1. P1 — Show verified state and command failures
 
-**Evidence:** `src/ClosedLidAwake.swift:14`, `:68`, `:450`, `:841`, `:886`.
+**Evidence:** `src/Lidwise.swift:14`, `:68`, `:450`, `:841`, `:886`.
 
 The process wrapper discards the exit status and stderr. `toggle()` displays a success HUD based on the requested action, regardless of its outcome. Both an empty helper response and `AWAKE MODE: UNKNOWN` parse as `state.on == false`; the card then says closing the lid sleeps the Mac. The protection badge only tests a guard PID and whether a launchd label exists; it does not establish that sleep restoration is authorized or that thermal monitoring works.
 
@@ -37,11 +37,11 @@ The process wrapper discards the exit status and stderr. `toggle()` displays a s
 
 ### 2. P1 — Make session ownership transactional
 
-**Evidence:** `bin/vibecaf:210`, `:223`, `:234`, `:991`, `:1067`, `:1110`.
+**Evidence:** `bin/lidwise:210`, `:223`, `:234`, `:991`, `:1067`, `:1110`.
 
 `on` has no already-on check or cross-process lock. It overwrites the ownership record before authorization and clears the session when authorization fails. Running `on` successfully again resets the six-hour deadline. A failed manual `off` stops the guard before attempting privileged sleep restoration.
 
-Status also equates global `SleepDisabled == 1` with this app being on, even without its ownership record (`bin/vibecaf:1190`, `:1238`). Both the UI and CLI toggle then call `off`, which clears the global flag. Another tool can own the hold, yet this app presents and removes it as its own session.
+Status also equates global `SleepDisabled == 1` with this app being on, even without its ownership record (`bin/lidwise:1190`, `:1238`). Both the UI and CLI toggle then call `off`, which clears the global flag. Another tool can own the hold, yet this app presents and removes it as its own session.
 
 **Isolated results:** failed repeated `on` removed both `owned` and `active` from a preexisting session. Failed `off` killed the fake guard and removed its PID record while retaining ownership. The independent guardian can still recover the latter after its grace period if it is running and authorization becomes available; the former removes the guardian's authority to recover.
 
@@ -51,7 +51,7 @@ Status also equates global `SleepDisabled == 1` with this app being on, even wit
 
 ### 3. P1 — Validate process identity and protect every runtime file
 
-**Evidence:** `bin/vibecaf:26`, `:129`, `:445`, `:882`, `:1055`, `:1110`.
+**Evidence:** `bin/lidwise:26`, `:129`, `:445`, `:882`, `:1055`, `:1110`.
 
 PID files are trusted after only `kill -0`. That checks whether some process exists, not whether this session started it. Predictable PID and network-state files are stored directly in `/tmp`; only the agent-cache directory has a symlink defense.
 
@@ -63,7 +63,7 @@ PID files are trusted after only `kill -0`. That checks whether some process exi
 
 ### 4. P1 — Constrain Wi-Fi recovery to the actual failure
 
-**Evidence:** `bin/vibecaf:574`, `:672`, `:750`, `:810`, `:823`.
+**Evidence:** `bin/lidwise:574`, `:672`, `:750`, `:810`, `:823`.
 
 The service-layer DHCP recovery unconditionally writes a temporary client ID and then clears it. It does not read the existing IPv4 method or client ID. A manually configured service with a missing route can therefore be converted to DHCP; an existing DHCP client ID is lost. The isolated probe confirmed two `-setdhcp` writes with no read of the service's previous configuration.
 
@@ -75,7 +75,7 @@ The classifier recognizes a non-Wi-Fi default route, but the recovery loop still
 
 ### 5. P1 — Treat packaging, install, upgrade, and removal as tested product paths
 
-**Evidence:** `scripts/build.sh:49`, `:90`; `scripts/install.sh:40`, `:47`, `:57`; `scripts/uninstall.sh:12`; `src/ClosedLidAwake.swift:1019`.
+**Evidence:** `scripts/build.sh:49`, `:90`; `scripts/install.sh:40`, `:47`, `:57`; `scripts/uninstall.sh:12`; `src/Lidwise.swift:1019`.
 
 The build signs only the outer app. The thermal helper is an embedded Mach-O in `Contents/Resources`, a nonstandard location for compiled code, and remains linker/ad hoc signed without hardened runtime. A successful local `codesign --verify --deep --strict` does not establish that all executable code meets notarization requirements. Move that executable to `Contents/Helpers` or another supported code directory and update its lookup path. Sign it with the same Developer ID, hardened runtime, and timestamp before signing the app, then notarize and assess the final extracted artifact. Reject any remaining ad hoc executable in a distribution candidate. See [Apple's signing guidance](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac/), [code placement guidance](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/Procedures/Procedures.html), and [notarization failure guidance](https://developer.apple.com/documentation/security/resolving-common-notarization-issues).
 
@@ -87,7 +87,7 @@ Disabling “Show in menu bar at login” calls `launchctl bootout` before remov
 
 ### 6. P1 — Reconcile the published version with the tested version
 
-The public [latest release](https://github.com/proofofreach/ClosedLidAwake/releases/latest) resolves to **v1.0.0**, published August 14. Local `VERSION` says **1.2.0**, whose changelog is still “unreleased.” Public `main` was `3cbc2b6`; the reviewed local `HEAD` was `acd5cdc`. The local 1.0 ZIP has neither the crash guardian nor the agent scanner. The stored local 1.2 ZIP includes both, but neither helper matches current source.
+The public [latest release](https://github.com/proofofreach/Lidwise/releases/latest) resolves to **v1.0.0**, published August 14. Local `VERSION` says **1.2.0**, whose changelog is still “unreleased.” Public `main` was `3cbc2b6`; the reviewed local `HEAD` was `acd5cdc`. The local 1.0 ZIP has neither the crash guardian nor the agent scanner. The stored local 1.2 ZIP includes both, but neither helper matches current source.
 
 Checksums for all three existing ZIPs pass. That proves archive integrity, not freshness or current behavior. Do not send new users to an old package while describing newer safeguards.
 
@@ -97,7 +97,7 @@ Checksums for all three existing ZIPs pass. That proves archive integrity, not f
 
 ### Agent status needs more honest semantics
 
-`bin/vibecaf-agent-scan:51` and `:59` treat a quiet session as completed after ten minutes. Claude completion is never parsed; Codex completion uses exact text matching rather than JSON structure. Nested `.jsonl` files, including subagents, count as independent sessions.
+`bin/lidwise-agent-scan:51` and `:59` treat a quiet session as completed after ten minutes. Claude completion is never parsed; Codex completion uses exact text matching rather than JSON structure. Nested `.jsonl` files, including subagents, count as independent sessions.
 
 Isolated examples: a Claude log quiet for 601 seconds becomes `completed`; a nested subagent becomes another active session; valid JSON with spaces around `"type": "task_complete"` becomes active. The first is the important product error: silence is not successful completion. The whitespace example demonstrates parser brittleness, not a claim about the current vendor's serialization format.
 
@@ -107,7 +107,7 @@ Use `Working`, `Quiet`, `Finished` only when evidenced, and `Unknown`/`Disconnec
 
 Preserve the existing dark panel and one-click control. The rendered panel has a clear status header, useful countdown, and sensible Settings disclosure. It does not need a visual redesign.
 
-The fault render exposes a specific layout issue: the battery floor and captive-portal instruction both truncate in the safety rail (`src/ClosedLidAwake.swift:412`, `:512`). Let fault messages wrap or expand into a separate actionable row. Critical recovery instructions must remain readable. Preview evidence: [normal](review-assets/menu-collapsed.png), [settings](review-assets/menu-expanded.png), [fault state](review-assets/menu-fault.png).
+The fault render exposes a specific layout issue: the battery floor and captive-portal instruction both truncate in the safety rail (`src/Lidwise.swift:412`, `:512`). Let fault messages wrap or expand into a separate actionable row. Critical recovery instructions must remain readable. Preview evidence: [normal](review-assets/menu-collapsed.png), [settings](review-assets/menu-expanded.png), [fault state](review-assets/menu-fault.png).
 
 Recommended default content:
 
@@ -210,16 +210,16 @@ Authenticated helper migration, signed automatic updates, lifecycle-hook adapter
 | `.gitignore`, `VERSION` | Generated outputs are ignored; version needs release reconciliation. |
 | `README.md`, `SECURITY.md`, `RELEASE_CHECKLIST.md`, `CHANGELOG.md`, `LICENSE` | Read in full; documentation drift and release gates listed above; MIT license present. |
 | `assets/app-icon.png` | Visually inspected; no launch-blocking asset issue. |
-| `src/ClosedLidAwake.swift` | State/command, startup, custom menu, placement, accessibility, and preview paths reviewed. |
+| `src/Lidwise.swift` | State/command, startup, custom menu, placement, accessibility, and preview paths reviewed. |
 | `src/ThermalState.swift` | Simple pressure-state reader; builds for both architectures; report missing/unknown sensor capability in UI. |
 | `src/makeicon.swift` | Read generator and inspected image; no launch blocker. |
-| `bin/vibecaf`, `bin/vibecaf-agent-scan` | Read in full; isolated failure probes and existing tests run; findings above. |
+| `bin/lidwise`, `bin/lidwise-agent-scan` | Read in full; isolated failure probes and existing tests run; findings above. |
 | `scripts/build.sh`, `scripts/check.sh`, `scripts/package.sh`, `scripts/notarize.sh` | Build/check run; packaging and notarization paths reviewed; existing ZIPs inspected; no Apple submission performed. |
 | `scripts/install.sh`, `scripts/uninstall.sh`, `scripts/write-guardian-plist.sh` | Read in full; plist test passed; real install/uninstall not run on the daily-use machine. |
-| `tests/test-guardian-plist.sh`, `tests/test-vibecaf-agent-discovery.sh` | Passed; scanner whitespace/quiet/child-session and command ownership boundaries remain uncovered. |
-| `tests/test-vibecaf-goal-monitoring.sh`, `tests/test-vibecaf-goals.sh` | Passed; tests establish observation does not own awake state. |
-| `tests/test-vibecaf-link-state.sh`, `tests/test-vibecaf-network-notifications.sh` | Passed; current tests pin the DHCP writes without testing preservation or the complete recovery loop. |
-| `tests/test-vibecaf-safety.sh` | Passed; mocked guard/guardian checks cover valuable cases but not real logout, process death, concurrent commands, or hardware behavior. |
+| `tests/test-guardian-plist.sh`, `tests/test-lidwise-agent-discovery.sh` | Passed; scanner whitespace/quiet/child-session and command ownership boundaries remain uncovered. |
+| `tests/test-lidwise-goal-monitoring.sh`, `tests/test-lidwise-goals.sh` | Passed; tests establish observation does not own awake state. |
+| `tests/test-lidwise-link-state.sh`, `tests/test-lidwise-network-notifications.sh` | Passed; current tests pin the DHCP writes without testing preservation or the complete recovery loop. |
+| `tests/test-lidwise-safety.sh` | Passed; mocked guard/guardian checks cover valuable cases but not real logout, process death, concurrent commands, or hardware behavior. |
 
 ## Review audit trail
 

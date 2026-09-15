@@ -2,11 +2,11 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/vibecaf-guardian-plist.XXXXXX")
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-guardian-plist.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 PLIST="$TEST_ROOT/app.closedlidawake.guardian.plist"
-VIBECAF="/tmp/Closed-Lid Awake.app/Contents/Resources/vibecaf"
+VIBECAF="/tmp/Lidwise.app/Contents/Resources/lidwise"
 "$ROOT/scripts/write-guardian-plist.sh" "$PLIST" "$VIBECAF"
 
 [ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$PLIST")" = "app.closedlidawake.guardian" ]

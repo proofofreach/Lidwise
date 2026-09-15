@@ -5,9 +5,9 @@ The original review is a dated audit. Completion evidence will be recorded separ
 
 ## Ownership
 
-- Core agent: `bin/vibecaf`, new `lib/vibecaf/session.sh` if useful, safety/ownership/config/JSON tests.
-- Network/observation agent: `lib/vibecaf/network.sh`, `lib/vibecaf/observation.sh`, `bin/vibecaf-agent-scan`, optional new `src/AgentScan.swift`, network/agent/goal tests.
-- UI agent: `src/ClosedLidAwake.swift`, any new UI Swift source and UI tests, `DESIGN.md`.
+- Core agent: `bin/lidwise`, new `lib/lidwise/session.sh` if useful, safety/ownership/config/JSON tests.
+- Network/observation agent: `lib/lidwise/network.sh`, `lib/lidwise/observation.sh`, `bin/lidwise-agent-scan`, optional new `src/AgentScan.swift`, network/agent/goal tests.
+- UI agent: `src/Lidwise.swift`, any new UI Swift source and UI tests, `DESIGN.md`.
 - Coordinator: build/package/install/uninstall/guardian scripts, release verification and lifecycle tests, product/user documentation, integration.
 
 Do not edit another owner's files without coordination. Do not install over the daily-use app, change real power/network/privilege state, publish, or run paid GitHub features during development. System calls in regression tests must be stubbed. Preserve the existing scanner fix that excludes browser native-message hosts.
@@ -64,9 +64,9 @@ Observation module exports `agents_json` (the agents object above), `goals_json`
 
 ## Build paths
 
-- Bundled shell entry: `Contents/Resources/vibecaf`.
-- Bundled modules: `Contents/Resources/lib/vibecaf/*.sh`.
-- Native helpers: `Contents/Helpers/vibecaf-thermal` and optional `vibecaf-agent-scan-core`.
+- Bundled shell entry: `Contents/Resources/lidwise`.
+- Bundled modules: `Contents/Resources/lib/lidwise/*.sh`.
+- Required native helpers: `Contents/Helpers/lidwise-thermal`, `lidwise-agent-scan-core`, and `lidwise-lid-probe`.
 - Source-checkout native helpers: `.build/helpers/` (built before shell tests).
 - Coordinator changes the build to allow isolated build/output directories so concurrent checks cannot erase another agent's work.
 

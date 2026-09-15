@@ -1,7 +1,7 @@
 import Foundation
 
 @main
-struct ClosedLidUIModelTests {
+struct LidwiseUIModelTests {
     static var failures = 0
 
     static func check(_ condition: @autoclosure () -> Bool, _ message: String) {
@@ -50,6 +50,8 @@ struct ClosedLidUIModelTests {
             check(state.phase == .externalOn, "external-on must remain distinct from off")
             check(state.networkRecovery, "saved network monitoring setting must decode")
             check(state.networkRecoveryAvailable == false, "automatic repair capability must decode separately")
+            check(state.agents.claude.waiting == 0 && state.agents.claude.failed == 0,
+                  "older agent payloads must decode additive attention counts as zero")
         } catch { check(false, "valid status failed: \(error)") }
 
         do {
@@ -88,9 +90,125 @@ struct ClosedLidUIModelTests {
         } catch { }
     }
 
+    static func testFeaturePayloads() {
+        let record = """
+        {"session_id":"session-1","started_at":100,"ended_at":200,"deadline":220,
+         "reason":"battery-floor","restoration":"failed","battery_start":52,"battery_end":20,
+         "power_start":"Battery","power_end":"Battery"}
+        """
+        let extra = """
+        ,"default_battery_floor":25,"require_ac":false,"default_require_ac":true,
+        "can_extend":true,"last_session":\(record)
+        """
+        do {
+            var json = String(data: statusJSON(phase: "owned-on", extra: extra), encoding: .utf8)!
+            json = json.replacingOccurrences(
+                of: "\"claude\": {\"working\": 0, \"quiet\": 0, \"finished\": 0}",
+                with: "\"claude\": {\"working\": 1, \"waiting\": 2, \"quiet\": 0, \"finished\": 0, \"failed\": 1}"
+            )
+            let state = try StatusParser.parse(Data(json.utf8))
+            check(state.selectedBatteryFloor == 25 && state.selectedRequireAC,
+                  "next-session power policy did not decode")
+            check(state.canExtend == true && state.lastSession?.restoration == .failed,
+                  "extension or last-session status did not decode")
+            check(state.attentionCount == 3 && state.agents.claude.detail.contains("waiting"),
+                  "waiting and failed agent counts were not exposed")
+        } catch { check(false, "feature status failed: \(error)") }
+
+        var canAdd = State(phase: .ownedOn, startedAt: 1_000, deadline: 1_000 + 19_800,
+                           remainingSeconds: 60, canExtend: true)
+        check(canAdd.canAddThirtyMinutes, "a session at 5h30m should allow a 30-minute extension")
+        canAdd.deadline = 1_000 + 20_700
+        check(!canAdd.canAddThirtyMinutes, "a session at 5h45m must not offer a rejected 30-minute extension")
+        canAdd.deadline = 1_000 + 19_800
+        canAdd.remainingSeconds = 0
+        check(!canAdd.canAddThirtyMinutes, "an expired session must not offer an extension")
+
+        do {
+            let history = try FeaturePayloadParser.history(Data("{\"schema_version\":1,\"sessions\":[\(record)]}".utf8))
+            check(history.sessions.count == 1 && history.sessions[0].batteryEnd == 20,
+                  "session history did not decode")
+            check(SessionText.report(history.sessions[0]).contains("Last restoration attempt") &&
+                  SessionText.report(history.sessions[0]).contains("Power at last attempt"),
+                  "failed restoration was incorrectly described as a completed end")
+        } catch { check(false, "history payload failed: \(error)") }
+
+        do {
+            let verification = try LidwiseFeatureParser.verification(Data("""
+            {"schema_version":1,"expectation":"awake","result":"inconclusive","summary":"Lid evidence was too short.",
+             "duration_seconds":60,"closed_lid_seconds":8.5,"sleep_seconds":0,"max_sample_gap":1.1,
+             "model":"MacBookPro","os_version":"macOS 15"}
+            """.utf8))
+            check(verification.result == .inconclusive && verification.report.contains("8.5 seconds"),
+                  "verification result did not decode into a copyable report")
+        } catch { check(false, "verification payload failed: \(error)") }
+
+        do {
+            let hooks = try LidwiseFeatureParser.hookStatus(Data("""
+            {"schema_version":1,
+             "claude":{"supported":true,"configured":false,"events":["working","waiting","finished","failed"]},
+             "codex":{"supported":true,"configured":true,"events":["finished"],"reason":"Completion only"}}
+            """.utf8))
+            check(hooks.codex.supported && hooks.codex.events == ["finished"],
+                  "UI must render provider capability returned by the helper")
+        } catch { check(false, "hook status failed: \(error)") }
+    }
+
+    static func testVerificationWorker() {
+        final class FixtureRunner: CommandRunning {
+            let lock = NSLock()
+            var arguments: [String] = []
+            var timeout: TimeInterval = 0
+            func run(executable: String, arguments: [String], timeout: TimeInterval) -> CommandResult {
+                lock.lock(); self.arguments = arguments; self.timeout = timeout; lock.unlock()
+                return CommandResult(stdout: Data("""
+                {"schema_version":1,"expectation":"sleep","result":"passed","summary":"Sleep observed.",
+                 "duration_seconds":15,"closed_lid_seconds":15,"sleep_seconds":12,"max_sample_gap":1,
+                 "model":"Fixture","os_version":"Fixture"}
+                """.utf8), stderr: Data(), exitCode: 0, timedOut: false, launchError: nil)
+            }
+        }
+        let runner = FixtureRunner()
+        let completed = DispatchSemaphore(value: 0)
+        var delivered: VerificationPayload?
+        VerificationWorker(runner: runner).run(executable: "fixture", expectation: .sleep, seconds: 2) { result in
+            if case .success(let payload) = result { delivered = payload }
+            completed.signal()
+        }
+        check(completed.wait(timeout: .now() + 2) == .success, "verification worker did not complete")
+        runner.lock.lock()
+        let arguments = runner.arguments
+        let timeout = runner.timeout
+        runner.lock.unlock()
+        check(arguments == ["verify", "--expect", "sleep", "--seconds", "15", "--json"],
+              "verification worker did not use the bounded native command")
+        check(timeout == 35 && delivered?.result == .passed,
+              "verification timeout or result delivery was wrong")
+
+        final class FailedJSONRunner: CommandRunning {
+            func run(executable: String, arguments: [String], timeout: TimeInterval) -> CommandResult {
+                CommandResult(stdout: Data("""
+                {"schema_version":1,"expectation":"awake","result":"passed","summary":"Untrusted partial output.",
+                 "duration_seconds":60,"closed_lid_seconds":60,"sleep_seconds":0,"max_sample_gap":1,
+                 "model":"Fixture","os_version":"Fixture"}
+                """.utf8), stderr: Data("probe timed out".utf8), exitCode: nil, timedOut: true, launchError: nil)
+            }
+        }
+        let failed = DispatchSemaphore(value: 0)
+        var rejectedFailedProcess = false
+        VerificationWorker(runner: FailedJSONRunner()).run(
+            executable: "fixture", expectation: .awake, seconds: 60
+        ) { result in
+            if case .failure = result { rejectedFailedProcess = true }
+            failed.signal()
+        }
+        check(failed.wait(timeout: .now() + 2) == .success && rejectedFailedProcess,
+              "valid-looking JSON from a timed-out probe was accepted")
+    }
+
     static func testProcessResults() {
         let runner = ProcessRunner()
-        let missing = runner.run(executable: "/tmp/closedlid-ui/no-such-helper", arguments: [], timeout: 1)
+        let missing = runner.run(executable: "/tmp/lidwise-ui/no-such-helper", arguments: [], timeout: 1)
         check(!missing.succeeded && missing.launchError != nil, "missing executable must report a launch error")
 
         let failed = runner.run(executable: "/bin/sh", arguments: ["-c", "printf 'permission denied' >&2; exit 7"], timeout: 2)
@@ -211,11 +329,13 @@ struct ClosedLidUIModelTests {
 
     static func main() {
         testStatusParsing()
+        testFeaturePayloads()
         testProcessResults()
         testPendingAndStaleResults()
         testMutationReconciliation()
         testActivityRefreshWorker()
+        testVerificationWorker()
         if failures > 0 { exit(1) }
-        print("ClosedLidUIModelTests: PASS")
+        print("LidwiseUIModelTests: PASS")
     }
 }

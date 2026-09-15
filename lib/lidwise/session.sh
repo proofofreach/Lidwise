@@ -46,8 +46,10 @@ uint_normalize() {
   while [ "${#value}" -gt 1 ] && [ "${value#0}" != "$value" ]; do value=${value#0}; done
   printf '%s' "$value"
 }
-valid_duration() { local value; value=$(uint_normalize "${1:-}") || return 1; [ "$value" -ge 1 ] && [ "$value" -le 21600 ]; }
-valid_percent() { local value; value=$(uint_normalize "${1:-}") || return 1; [ "$value" -ge 1 ] && [ "$value" -le 100 ]; }
+valid_duration() { local value; value=$(uint_normalize "${1:-}") || return 1; [ "${#value}" -le 5 ] && [ "$value" -ge 1 ] && [ "$value" -le 21600 ]; }
+valid_percent() { local value; value=$(uint_normalize "${1:-}") || return 1; [ "${#value}" -le 3 ] && [ "$value" -ge 1 ] && [ "$value" -le 100 ]; }
+valid_battery_percent() { local value; value=$(uint_normalize "${1:-}") || return 1; [ "${#value}" -le 3 ] && [ "$value" -ge 0 ] && [ "$value" -le 100 ]; }
+valid_epoch() { local value; value=$(uint_normalize "${1:-}") || return 1; [ "${#value}" -le 10 ]; }
 valid_bool() { case "${1:-}" in 0|1) return 0 ;; *) return 1 ;; esac; }
 valid_session_id() { case "${1:-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac; }
 
@@ -76,11 +78,30 @@ read_uint() {
   printf '%s' "$value"
 }
 
+read_epoch() {
+  local value fallback=${3:-0}
+  value=$(read_field "$1" "$2" "$fallback")
+  if valid_epoch "$value"; then value=$(uint_normalize "$value"); else value=$fallback; fi
+  printf '%s' "$value"
+}
+
 config_duration() {
   local value
   value=$(read_field "$CONFIG_DIR" duration "$DEFAULT_DURATION")
   if valid_duration "$value"; then value=$(uint_normalize "$value"); else value=21600; fi
   printf '%s' "$value"
+}
+
+config_battery_floor() {
+  local value
+  value=$(read_field "$CONFIG_DIR" battery-floor "$DEFAULT_BATTERY_FLOOR")
+  if valid_percent "$value"; then value=$(uint_normalize "$value"); else value=20; fi
+  printf '%s' "$value"
+}
+
+config_require_ac() {
+  local value
+  value=$(read_field "$CONFIG_DIR" require-ac 0); valid_bool "$value" || value=0; printf '%s' "$value"
 }
 
 config_recovery() {
@@ -169,8 +190,9 @@ legacy_session_record_valid() {
   [ -f "$SESSION_DIR/owned" ] && [ -f "$SESSION_DIR/active" ] || return 1
   owned=$(read_field "$SESSION_DIR" owned); started=$(read_field "$SESSION_DIR" started "$owned")
   heartbeat=$(read_field "$SESSION_DIR" heartbeat); deadline=$(read_field "$SESSION_DIR" deadline)
-  owned=$(uint_normalize "$owned") || return 1; started=$(uint_normalize "$started") || return 1
-  heartbeat=$(uint_normalize "$heartbeat") || return 1; deadline=$(uint_normalize "$deadline") || return 1
+  valid_epoch "$owned" && valid_epoch "$started" && valid_epoch "$heartbeat" && valid_epoch "$deadline" || return 1
+  owned=$(uint_normalize "$owned"); started=$(uint_normalize "$started")
+  heartbeat=$(uint_normalize "$heartbeat"); deadline=$(uint_normalize "$deadline")
   [ "$deadline" -ge "$started" ] || return 1; duration=$((deadline-started)); [ "$duration" -ge 1 ] && [ "$duration" -le 21600 ]
 }
 legacy_session_valid() {
@@ -222,7 +244,7 @@ lock_acquire() {
   case "$rc" in
     0) ;;
     64) exec 9>&-; rm -f "$file"; echo "This macOS version does not support the required kernel lock mode." >&2; return 1 ;;
-    *) exec 9>&-; rm -f "$file"; echo "Another vibecaf command is still running." >&2; return 1 ;;
+    *) exec 9>&-; rm -f "$file"; echo "Another lidwise command is still running." >&2; return 1 ;;
   esac
   trap 'lock_release' EXIT
   trap 'exit 129' HUP
@@ -343,19 +365,24 @@ lock_reclaim_for_recovery() {
 }
 
 session_valid() {
-  local id state started deadline duration floor recovery notifications
+  local id state started deadline duration floor recovery notifications require_ac policy_version elapsed
   id=$(read_field "$SESSION_DIR" id); state=$(read_field "$SESSION_DIR" state)
   started=$(read_field "$SESSION_DIR" started_at); deadline=$(read_field "$SESSION_DIR" deadline)
   duration=$(read_field "$SESSION_DIR" duration_seconds); floor=$(read_field "$SESSION_DIR" battery_floor)
   recovery=$(read_field "$SESSION_DIR" recovery); notifications=$(read_field "$SESSION_DIR" notifications)
+  require_ac=$(read_field "$SESSION_DIR" require_ac 0); policy_version=$(read_field "$SESSION_DIR" policy_version 1)
   valid_session_id "$id" && case "$state" in enabling|active) true ;; *) false ;; esac &&
-    valid_uint "$started" && valid_uint "$deadline" && valid_duration "$duration" || return 1
+    valid_epoch "$started" && valid_epoch "$deadline" && valid_duration "$duration" || return 1
   started=$(uint_normalize "$started"); deadline=$(uint_normalize "$deadline"); duration=$(uint_normalize "$duration")
   floor=$(uint_normalize "$floor" 2>/dev/null) || return 1
   recovery=$(uint_normalize "$recovery" 2>/dev/null) || return 1
   notifications=$(uint_normalize "$notifications" 2>/dev/null) || return 1
-  [ "$deadline" -eq $((started + duration)) ] && valid_percent "$floor" &&
-    valid_bool "$recovery" && valid_bool "$notifications"
+  require_ac=$(uint_normalize "$require_ac" 2>/dev/null) || return 1
+  policy_version=$(uint_normalize "$policy_version" 2>/dev/null) || return 1
+  elapsed=$((deadline - started))
+  [ "$elapsed" -ge 1 ] && [ "$elapsed" -le 21600 ] && valid_percent "$floor" &&
+    valid_bool "$recovery" && valid_bool "$notifications" && valid_bool "$require_ac" &&
+    case "$policy_version" in 1|2) true ;; *) false ;; esac
 }
 
 session_active() { { modern_session_owned && [ "$(read_field "$SESSION_DIR" state)" = active ]; } || legacy_session_valid; }
@@ -363,11 +390,13 @@ session_owned() { modern_session_owned || legacy_session_valid || legacy_enablin
 session_claim_current() { [ "$(current_session_id)" = "$1" ] && modern_session_owned && [ "$(read_field "$SESSION_DIR" state)" = enabling ]; }
 
 session_claim() {
-  local id=$1 now=$2 duration=$3 start
+  local id=$1 now=$2 duration=$3 start battery_start=${4:--} power_start=${5:--}
   state_init || return 1; start=$(process_start_identity $$)
   write_field "$SESSION_DIR" id "$id" && write_field "$SESSION_DIR" state enabling &&
     write_field "$SESSION_DIR" started_at "$now" && write_field "$SESSION_DIR" deadline "$((now + duration))" &&
     write_field "$SESSION_DIR" duration_seconds "$duration" && write_field "$SESSION_DIR" battery_floor "$BATTERY_FLOOR" &&
+    write_field "$SESSION_DIR" require_ac "$REQUIRE_AC" && write_field "$SESSION_DIR" policy_version 2 &&
+    write_field "$SESSION_DIR" battery_start "$battery_start" && write_field "$SESSION_DIR" power_start "$power_start" &&
     write_field "$SESSION_DIR" recovery "$(config_recovery)" && write_field "$SESSION_DIR" notifications "$(config_notifications)" &&
     write_field "$SESSION_DIR" heartbeat "$now" && write_field "$SESSION_DIR" thermal-strikes 0 &&
     write_field "$SESSION_DIR" enabling_pid "$$" && write_field "$SESSION_DIR" enabling_start "$start"
@@ -383,11 +412,26 @@ session_activate() {
 
 session_touch() { session_active && write_field "$SESSION_DIR" heartbeat "$(date +%s)"; }
 
+session_extend_deadline() {
+  local by=$1 now started deadline maximum new_deadline
+  valid_duration "$by" || return 2
+  modern_session_owned && session_valid && [ "$(read_field "$SESSION_DIR" state)" = active ] || return 1
+  now=$(date +%s); started=$(read_uint "$SESSION_DIR" started_at 0); deadline=$(read_uint "$SESSION_DIR" deadline 0)
+  [ "$deadline" -gt "$now" ] || return 1
+  maximum=$((started + 21600)); new_deadline=$((deadline + $(uint_normalize "$by")))
+  [ "$new_deadline" -le "$maximum" ] || return 3
+  write_field "$SESSION_DIR" deadline "$new_deadline" || return 1
+  write_field "$SESSION_DIR" duration_seconds "$((new_deadline - started))" || true
+  rm -f "$SESSION_DIR/warned_deadline"
+  printf '%s' "$new_deadline"
+}
+
 session_clear() {
   secure_dir "$SESSION_DIR" || return 1
   rm -f "$SESSION_DIR/id" "$SESSION_DIR/state" "$SESSION_DIR/started_at" "$SESSION_DIR/deadline" \
     "$SESSION_DIR/duration_seconds" "$SESSION_DIR/battery_floor" "$SESSION_DIR/recovery" \
-    "$SESSION_DIR/notifications" "$SESSION_DIR/heartbeat" "$SESSION_DIR/thermal-strikes" \
+    "$SESSION_DIR/require_ac" "$SESSION_DIR/policy_version" "$SESSION_DIR/battery_start" "$SESSION_DIR/power_start" \
+    "$SESSION_DIR/notifications" "$SESSION_DIR/heartbeat" "$SESSION_DIR/thermal-strikes" "$SESSION_DIR/warned_deadline" \
     "$SESSION_DIR/recovery_verified_at" "$SESSION_DIR/recovery_verified_session" \
     "$SESSION_DIR/recovery_failed_at" "$SESSION_DIR/recovery_failed_session" \
     "$SESSION_DIR/guardian_session" "$SESSION_DIR/guardian_heartbeat" \

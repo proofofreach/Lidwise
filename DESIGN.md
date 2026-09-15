@@ -1,8 +1,8 @@
-# Closed-Lid Awake design
+# Lidwise design
 
 ## Product intent
 
-Closed-Lid Awake is a macOS menu bar utility for a manual, time-bounded awake session. It serves people who leave long local jobs running while a MacBook lid is closed. The app reports verified helper state. Agent and goal data is observation only.
+Lidwise is a macOS menu bar utility for a manual, time-bounded awake session. It serves people who leave long local jobs running while a MacBook lid is closed. The app reports verified helper state. Agent and goal data is observation only.
 
 ## Accepted identity
 
@@ -44,7 +44,12 @@ Never use “Protected” as a result of a click. “Recovery ready” is permit
 
 - Session durations are fixed at 30 minutes, 1 hour, 2 hours, and 6 hours.
 - Changing duration while a session runs changes the next session. It does not extend the current deadline.
-- Activity is collapsed by default. Hide empty providers and empty goals. Use only `working`, `quiet`, and `finished` counts supplied by the helper.
+- Show **Add 30 minutes** only while the helper reports that the owned session can be extended. Keep the six-hour total cap visible in the action detail.
+- Battery floor and AC requirements apply to the next session. Keep them in Settings and continue to show the active session's actual policy in the status card.
+- Activity is collapsed by default. Hide empty providers and empty goals. Use only helper-supplied `working`, `waiting`, `quiet`, `finished`, and `failed` counts. Surface the combined waiting and failed count as attention, without inferring success.
+- Keep session history private and bounded. Use a separate readable detail window. A failed restoration record describes the last restoration attempt because the session can still be active.
+- Agent integration setup is optional. Show helper-reported provider support, current setup, and an exact configuration preview before installation. Never imply that a provider supports signals it does not report.
+- **Test closed-lid behavior** opens a separate, non-modal window. Explain the ventilated-surface procedure, keep the menu controls usable, show progress, and provide a selectable, copyable result. An inconclusive measurement is not a pass or failure.
 - **Network monitoring** controls read-only probes. It does not promise automatic repair or change network settings.
 - **Quit menu bar app** leaves an owned manual session running to its deadline.
 - **Turn off and quit** first verifies normal sleep restoration. It stays disabled when no app-owned session is active.

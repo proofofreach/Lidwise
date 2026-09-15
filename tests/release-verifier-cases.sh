@@ -4,15 +4,21 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 [ "$#" -eq 1 ] || { echo 'usage: release-verifier-cases.sh candidate.zip' >&2; exit 2; }
 ORIGINAL=$1
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/closedlid-release-tests.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-release-tests.XXXXXX")
+cleanup() {
+  local result=$?
+  if [ "$result" -ne 0 ] && [ -f "$WORK/output" ]; then cat "$WORK/output" >&2; fi
+  rm -rf "$WORK"
+  exit "$result"
+}
+trap cleanup EXIT
 reset_archive() {
   rm -rf "$WORK/extracted"
   mkdir "$WORK/extracted"
   /usr/bin/ditto -x -k "$ORIGINAL" "$WORK/extracted"
   roots=("$WORK/extracted"/*)
   PACKAGE=${roots[0]}
-  APP="$PACKAGE/Closed-Lid Awake.app"
+  APP="$PACKAGE/Lidwise.app"
 }
 reject_archive() {
   rm -f "$WORK/candidate.zip"
@@ -34,12 +40,29 @@ cp /usr/bin/true "$PACKAGE/unexpected-tool"
 reject_archive 'extra executable'
 grep -q 'Unexpected archive file' "$WORK/output"
 reset_archive
-rm "$APP/Contents/Helpers/vibecaf-agent-scan-core"
+rm "$APP/Contents/Helpers/lidwise-agent-scan-core"
 /usr/bin/codesign --force --sign - "$APP" 2>/dev/null
 reject_archive 'missing scanner'
 reset_archive
-/usr/bin/lipo "$APP/Contents/MacOS/ClosedLidAwake" -thin arm64 -output "$WORK/thin"
-cp "$WORK/thin" "$APP/Contents/MacOS/ClosedLidAwake"
+rm "$APP/Contents/Helpers/lidwise-lid-probe"
+/usr/bin/codesign --force --sign - "$APP" 2>/dev/null
+reject_archive 'missing lid measurement helper'
+reset_archive
+mv "$APP/Contents/Helpers/lidwise-lid-probe" "$APP/Contents/Helpers/unexpected-probe"
+printf '#!/bin/sh\nexit 0\n' > "$APP/Contents/Helpers/lidwise-lid-probe"
+chmod 755 "$APP/Contents/Helpers/lidwise-lid-probe"
+/usr/bin/codesign --force --sign - "$APP/Contents/Helpers/lidwise-lid-probe" 2>/dev/null
+/usr/bin/codesign --force --sign - "$APP" 2>/dev/null
+reject_archive 'shell stub plus misplaced native probe'
+grep -q 'Expected native executable missing: Contents/Helpers/lidwise-lid-probe' "$WORK/output"
+reset_archive
+cp "$APP/Contents/Helpers/lidwise-lid-probe" "$APP/Contents/Helpers/unexpected-probe"
+/usr/bin/codesign --force --sign - "$APP" 2>/dev/null
+reject_archive 'unexpected nested native executable'
+grep -q 'Unexpected native executable' "$WORK/output"
+reset_archive
+/usr/bin/lipo "$APP/Contents/MacOS/Lidwise" -thin arm64 -output "$WORK/thin"
+cp "$WORK/thin" "$APP/Contents/MacOS/Lidwise"
 /usr/bin/codesign --force --sign - "$APP" 2>/dev/null
 reject_archive 'single-architecture universal archive'
 grep -q 'Missing x86_64' "$WORK/output"
@@ -52,9 +75,9 @@ mkdir "$WORK/destination"
 name=$(basename "$ORIGINAL")
 cp "$ORIGINAL" "$WORK/destination/$name"
 cp "$ORIGINAL.sha256" "$WORK/destination/$name.sha256"
-/usr/bin/ditto "$APP" "$WORK/destination/Closed-Lid Awake.app"
-rm "$WORK/destination/Closed-Lid Awake.app/Contents/Helpers/vibecaf-agent-scan-core"
-/usr/bin/codesign --force --sign - "$WORK/destination/Closed-Lid Awake.app" 2>/dev/null
+/usr/bin/ditto "$APP" "$WORK/destination/Lidwise.app"
+rm "$WORK/destination/Lidwise.app/Contents/Helpers/lidwise-agent-scan-core"
+/usr/bin/codesign --force --sign - "$WORK/destination/Lidwise.app" 2>/dev/null
 if DIST_DIR="$WORK/destination" SKIP_BUILD=1 RELEASE_MODE=community "$ROOT/scripts/package.sh" > "$WORK/output" 2>&1; then
   echo 'Packager accepted missing scanner' >&2; exit 1
 fi

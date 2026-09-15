@@ -1,0 +1,235 @@
+#!/bin/bash
+# Discover recent Claude Code and Codex sessions without making them owners of
+# the global awake window. Output: provider<TAB>session<TAB>state<TAB>age.
+# States are working, waiting, quiet, finished, and failed. Quiet is never
+# inferred finished. Explicit lifecycle events are local metadata only.
+
+set -u
+
+NOW=${VIBECAF_AGENT_NOW:-$(date +%s)}
+ACTIVE_WITHIN=${VIBECAF_AGENT_ACTIVE_WITHIN:-90}
+RECENT_WITHIN=${VIBECAF_AGENT_RECENT_WITHIN:-1800}
+QUIET_WITHIN=${VIBECAF_AGENT_QUIET_WITHIN:-600}
+CLAUDE_ROOT=${VIBECAF_CLAUDE_SESSIONS:-"$HOME/.claude/projects"}
+CODEX_ROOT=${VIBECAF_CODEX_SESSIONS:-"$HOME/.codex/sessions"}
+USER_ID=$(id -u)
+RUNTIME_DIR=${VIBECAF_RUNTIME_DIR:-"/tmp/vibecaf.$USER_ID"}
+EVENT_DIR=${VIBECAF_AGENT_EVENT_DIR:-"$RUNTIME_DIR/agent-events"}
+EVENT_FILE="$EVENT_DIR/events.tsv"
+EVENT_MAX=${VIBECAF_AGENT_EVENT_MAX:-128}
+SCAN_MAX=${VIBECAF_AGENT_SCAN_MAX:-128}
+EVENT_MAX_AGE=${VIBECAF_AGENT_EVENT_MAX_AGE:-$RECENT_WITHIN}
+CLAUDE_SETTINGS=${VIBECAF_CLAUDE_SETTINGS:-"$HOME/.claude/settings.json"}
+HOOK_CALLBACK=0
+[ "${1:-}" = --hooks ] && [ "${2:-}" = hook ] && HOOK_CALLBACK=1
+
+bounded_uint() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 10 ] && [ $((10#$1)) -le "$2" ] 2>/dev/null
+}
+bounded_uint "$NOW" 4102444800 && bounded_uint "$ACTIVE_WITHIN" 86400 \
+  && bounded_uint "$RECENT_WITHIN" 604800 && bounded_uint "$QUIET_WITHIN" 604800 \
+  && bounded_uint "$EVENT_MAX_AGE" 604800 && bounded_uint "$EVENT_MAX" 1024 \
+  && bounded_uint "$SCAN_MAX" 512 && [ $((10#$EVENT_MAX)) -ge 1 ] \
+  && [ $((10#$SCAN_MAX)) -ge 1 ] || {
+    [ "$HOOK_CALLBACK" -eq 1 ] && exit 0
+    echo 'invalid agent scan limits' >&2
+    exit 2
+  }
+NOW=$((10#$NOW)); ACTIVE_WITHIN=$((10#$ACTIVE_WITHIN)); RECENT_WITHIN=$((10#$RECENT_WITHIN))
+QUIET_WITHIN=$((10#$QUIET_WITHIN)); EVENT_MAX_AGE=$((10#$EVENT_MAX_AGE)); EVENT_MAX=$((10#$EVENT_MAX))
+SCAN_MAX=$((10#$SCAN_MAX))
+RECENT_MINUTES=$((RECENT_WITHIN / 60 + 1))
+
+if [ -n "${VIBECAF_AGENT_PROCESS_FILE:-}" ]; then
+  PROCESS_SNAPSHOT=$(sed -n '1,10000p' "$VIBECAF_AGENT_PROCESS_FILE" 2>/dev/null || true)
+else
+  PROCESS_SNAPSHOT=$(ps -x -o pid=,ppid=,command= 2>/dev/null || true)
+fi
+
+# A provider counts as connected only when a real session process is running.
+# MCP servers (`codex mcp-server`, `claude mcp serve`) are spawned by *other*
+# agents and sit idle waiting for calls; when they do work they write a session
+# log and are counted from that. Matching them here invented an idle Codex
+# session whenever Claude Code had its Codex plugin loaded. Crash reporters
+# (ChatGPT.app's "Codex Framework.framework/.../crashpad_handler") are helpers
+# of the same kind: always running, never a session. Browser native-messaging
+# hosts also stay alive after Claude Code closes and must not count as sessions.
+connected() {
+  local snapshot
+  snapshot=$(printf '%s\n' "$PROCESS_SNAPSHOT" | grep -Eiv 'mcp-server|mcp serve|crashpad|--chrome-native-host')
+  case "$1" in
+    claude)
+      printf '%s\n' "$snapshot" \
+        | grep -Eiq '(^|[ /])claude([[:space:]]|$)' ;;
+    codex)
+      printf '%s\n' "$snapshot" \
+        | grep -Eiq '(^|[ /])codex([[:space:]]|$)|Codex\.app|/Codex \(' ;;
+  esac
+}
+
+file_age() {
+  local modified age
+  modified=$(stat -f %m "$1" 2>/dev/null || echo 0)
+  case "$modified" in ""|*[!0-9]*) modified=0 ;; esac
+  age=$((NOW - modified))
+  [ "$age" -lt 0 ] && age=0
+  printf '%s\n' "$age"
+}
+
+# The native Foundation helper reads a bounded tail and emits only event state.
+# This avoids spawning several JSON decoders per transcript line.
+SCAN_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -n "${VIBECAF_AGENT_MARKER_CMD:-}" ]; then MARKER_CMD=$VIBECAF_AGENT_MARKER_CMD
+elif [ -x "$SCAN_DIR/../Helpers/lidwise-agent-scan-core" ]; then MARKER_CMD="$SCAN_DIR/../Helpers/lidwise-agent-scan-core"
+else MARKER_CMD="$SCAN_DIR/../.build/helpers/lidwise-agent-scan-core"; fi
+session_marker() { "$MARKER_CMD" "$1" "$2" 2>/dev/null || true; }
+session_marker_with_time() { "$MARKER_CMD" --marker-with-time "$1" "$2" 2>/dev/null || true; }
+
+record_event() { # record_event <provider> <state> <session> [timestamp]
+  "$MARKER_CMD" --event-record "$EVENT_FILE" "$1" "$2" "$3" "${4:-$NOW}" "$NOW" "$EVENT_MAX"
+}
+
+# Prints state<TAB>timestamp for the newest valid fresh event. The optional
+# session key is the UUID at the end of a discovered transcript path.
+event_for_session() {
+  local provider=$1 session=$2 line_p line_s line_state line_when best_when=0 best_state="" age
+  while IFS=$'\t' read -r line_p line_s line_state line_when; do
+    [ "$line_p" = "$provider" ] && [ "$line_s" = "$session" ] || continue
+    [ "$line_when" -ge "$best_when" ] || continue
+    best_when=$line_when; best_state=$line_state
+  done < <("$MARKER_CMD" --events-read "$EVENT_FILE" "$NOW" "$EVENT_MAX_AGE" 2>/dev/null || true)
+  [ -n "$best_state" ] || return 1
+  printf '%s\t%s\n' "$best_state" "$best_when"
+}
+
+event_file_mtime() { stat -f %m "$1" 2>/dev/null || echo 0; }
+
+hook_event() { # hook_event <claude> <kind>, JSON only on stdin
+  "$MARKER_CMD" --event-hook "$EVENT_FILE" "$1" "$NOW" "$EVENT_MAX" "$2"
+}
+
+hook_command() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\"'\\\"'/g")"; }
+hook_command_for() {
+  printf '%s --hooks hook claude' "$(hook_command "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")")"
+  [ -z "${1:-}" ] || printf ' %s' "$1"
+}
+hooks_status_json() {
+  local configured=false raw
+  raw=$("$MARKER_CMD" --claude-settings status "$CLAUDE_SETTINGS" "$(hook_command_for '')") || return 1
+  case "$raw" in *'"configured":true'*) configured=true ;; esac
+  printf '{"schema_version":1,"claude":{"supported":true,"configured":%s,"events":["working","waiting","finished","failed"]},"codex":{"supported":false,"configured":false,"events":[],"reason":"Automatic Codex hook setup is not implemented; completion remains observed from local logs. No waiting signal is provided."}}\n' "$configured"
+}
+hooks_claude_configured() {
+  "$MARKER_CMD" --claude-settings status "$CLAUDE_SETTINGS" "$(hook_command_for '')" 2>/dev/null | grep -q '"configured":true'
+}
+hooks_preview() {
+  local json=${1:-}
+  if [ "$json" = --json ]; then
+    "$MARKER_CMD" --claude-settings preview "$CLAUDE_SETTINGS" "$(hook_command_for '')"
+  else
+    "$MARKER_CMD" --claude-settings preview "$CLAUDE_SETTINGS" "$(hook_command_for '')"
+  fi
+}
+hooks_write_claude() {
+  "$MARKER_CMD" --claude-settings "$1" "$CLAUDE_SETTINGS" "$(hook_command_for '')"
+}
+hooks_command() {
+  local action=${1:-} arg=${2:-} extra=${3:-}
+  case "$action" in
+    status) [ -z "$extra" ] && { if [ "$arg" = --json ]; then hooks_status_json; elif [ -z "$arg" ]; then hooks_claude_configured && echo 'Claude Code: configured' || echo 'Claude Code: not configured'; echo 'Codex: automatic hook setup is not implemented; completion uses local logs and no waiting signal is provided.'; else return 2; fi; } ;;
+    preview)
+      case "$arg:$extra" in
+        :|claude:) hooks_preview ;;
+        --json:|claude:--json) hooks_preview --json ;;
+        *) return 2 ;;
+      esac ;;
+    install|remove) case "$arg" in claude) [ -z "$extra" ] || return 2; hooks_write_claude "$action" || return; echo "Claude Code lifecycle observation hooks $([ "$action" = install ] && echo installed || echo removed)." ;; all) [ "$action" = remove ] && [ -z "$extra" ] || return 2; hooks_write_claude remove || return; echo 'Lidwise lifecycle observation hooks removed.' ;; *) return 2 ;; esac ;;
+    event) [ -n "$arg" ] && [ -n "$extra" ] || return 2; record_event "$arg" "$extra" "${4:-}" "${5:-$NOW}" ;;
+    hook) hook_event "$arg" "$extra" >/dev/null 2>&1 || true ;;
+    *) return 2 ;;
+  esac
+}
+
+if [ "${1:-}" = --hooks ]; then
+  shift
+  hooks_command "$@" || { echo "usage: lidwise-agent-scan --hooks <status [--json]|preview [claude] [--json]|install claude|remove claude>" >&2; exit 2; }
+  exit 0
+fi
+
+is_child_session() {
+  case "$1" in subagent/*|subagents/*|children/*|*/subagent/*|*/subagents/*|*/children/*|subagent-*|*'/subagent-'*) return 0 ;; esac
+  return 1
+}
+
+EMITTED_KEYS=""
+CLAUDE_FOUND=0; CODEX_FOUND=0; CLAUDE_CONNECTED=0; CODEX_CONNECTED=0
+mark_emitted() { EMITTED_KEYS="${EMITTED_KEYS}${1}"$'\t'"${2}"$'\n'; }
+was_emitted() { printf '%s' "$EMITTED_KEYS" | grep -Fqx "$1"$'\t'"$2"; }
+
+scan_provider() {  # scan_provider <provider> <root>
+  local provider=$1 root=$2 file age state session found=0 is_connected=0 marker marker_detail marker_at relative explicit explicit_state explicit_at modified session_id
+  connected "$provider" && is_connected=1
+  if [ "$provider" = claude ]; then CLAUDE_CONNECTED=$is_connected; else CODEX_CONNECTED=$is_connected; fi
+
+  if [ -d "$root" ]; then
+    while IFS= read -r file; do
+      [ -f "$file" ] || continue
+      age=$(file_age "$file")
+      [ "$age" -le "$RECENT_WITHIN" ] || continue
+      relative=${file#"$root"/}; session=${relative%.jsonl}
+      case "$session" in *$'\t'*|*$'\n'*) continue ;; esac
+      is_child_session "$session" && continue
+
+      marker_detail=$(session_marker_with_time "$provider" "$file")
+      marker=${marker_detail%%$'\t'*}; marker_at=${marker_detail#*$'\t'}
+      [ "$marker" != child ] || continue
+
+      if [ "$marker" = finished ]; then
+        state=finished
+      elif [ "$age" -le "$ACTIVE_WITHIN" ]; then
+        state=working
+      elif [ "$age" -le "$QUIET_WITHIN" ]; then
+        state=quiet
+      else
+        # No event says this completed. It is still merely quiet while it is
+        # within the configured recent horizon.
+        state=quiet
+      fi
+      session_id=${session##*/}; modified=$(event_file_mtime "$file")
+      if explicit=$(event_for_session "$provider" "$session_id"); then
+        explicit_state=${explicit%%$'\t'*}; explicit_at=${explicit#*$'\t'}
+        # Only a meaningful transcript event can supersede hook evidence.
+        # Metadata-only appends do not clear waiting or terminal states.
+        case "$marker_at" in ''|*[!0-9]*) marker_at=0 ;; esac
+        [ "$marker_at" -le $(((NOW + 5) * 1000)) ] || marker_at=0
+        # Hook storage has whole-second precision. Treat the full hook second
+        # as ambiguous; only activity in a later second can supersede it.
+        if [ "$marker_at" -lt $(((explicit_at + 1) * 1000)) ]; then state=$explicit_state; fi
+      fi
+      found=1
+      mark_emitted "$provider" "$session_id"
+      printf '%s\t%s\t%s\t%s\n' "$provider" "$session" "$state" "$age"
+    done < <(find "$root" -type f -name '*.jsonl' -mmin "-$RECENT_MINUTES" -print 2>/dev/null | sort | tail -n "$SCAN_MAX")
+  fi
+
+  if [ "$provider" = claude ]; then CLAUDE_FOUND=$found; else CODEX_FOUND=$found; fi
+}
+
+scan_explicit_only() {
+  local provider session state when age marker
+  while IFS=$'\t' read -r provider session state when; do
+    age=$((NOW - when)); [ "$age" -ge 0 ] && [ "$age" -le "$EVENT_MAX_AGE" ] || continue
+    # Deduplicate only against a transcript that this bounded scan emitted.
+    was_emitted "$provider" "$session" && continue
+    mark_emitted "$provider" "$session"
+    if [ "$provider" = claude ]; then CLAUDE_FOUND=1; else CODEX_FOUND=1; fi
+    printf '%s\t%s\t%s\t%s\n' "$provider" "$session" "$state" "$age"
+  done < <("$MARKER_CMD" --events-read "$EVENT_FILE" "$NOW" "$EVENT_MAX_AGE" 2>/dev/null || true)
+}
+
+scan_provider claude "$CLAUDE_ROOT"
+scan_provider codex "$CODEX_ROOT"
+scan_explicit_only
+if [ "$CLAUDE_FOUND" -eq 0 ] && [ "$CLAUDE_CONNECTED" -eq 1 ]; then printf 'claude\tclaude\tquiet\t0\n'; fi
+if [ "$CODEX_FOUND" -eq 0 ] && [ "$CODEX_CONNECTED" -eq 1 ]; then printf 'codex\tcodex\tquiet\t0\n'; fi

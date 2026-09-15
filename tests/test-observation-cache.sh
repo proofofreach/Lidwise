@@ -1,13 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/closedlid-cache.XXXXXX")
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-cache.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 RUNTIME_DIR="$WORK"
 AGENT_RUNTIME_DIR="$WORK/runtime"
 AGENTSTATEFILE="$AGENT_RUNTIME_DIR/sessions.tsv"
 AGENT_CACHE_MAX_AGE=120
-source "$ROOT/lib/vibecaf/observation.sh"
+source "$ROOT/lib/lidwise/observation.sh"
 agents_refresh() { touch "$WORK/scanner-called"; return 1; }
 # Missing optional data must never invoke a scanner from the power-status path.
 result=$(agents_json)

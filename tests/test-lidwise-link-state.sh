@@ -9,7 +9,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/vibecaf-linkstate.XXXXXX")
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-linkstate.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 BIN="$TEST_ROOT/bin"; mkdir -p "$BIN"
@@ -63,7 +63,7 @@ printf '%s' "${STUB_CODE:-000}"
 EOF
 chmod +x "$BIN"/*
 
-probe() { "$ROOT/bin/vibecaf" netdiag 2>/dev/null | awk '/^state:/{print $2}'; }
+probe() { "$ROOT/bin/lidwise" netdiag 2>/dev/null | awk '/^state:/{print $2}'; }
 
 expect() {  # expect <want> <label>
   local got; got=$(probe)
@@ -110,7 +110,7 @@ echo "dhcp renew:"
 # Current macOS has no documented configuration-preserving lease renewal. The
 # no-IP diagnosis stays actionable but must make no DHCP or radio write.
 CALLS="$TEST_ROOT/setdhcp.calls"
-if STUB_IP=10.0.0.5 STUB_CLIENT_ID=custom-id STUB_CALLS="$CALLS" "$ROOT/bin/vibecaf" __dhcp_renew en0; then
+if STUB_IP=10.0.0.5 STUB_CLIENT_ID=custom-id STUB_CALLS="$CALLS" "$ROOT/bin/lidwise" __dhcp_renew en0; then
   echo "FAIL: renewal claimed a safe mutation path" >&2; exit 1
 elif [ -s "$CALLS" ]; then
   echo "FAIL: DHCP client ID or service config was changed:" >&2; cat "$CALLS" >&2; exit 1
@@ -118,7 +118,7 @@ else
   echo "  ok: unsupported lease renewal is diagnostic only"
 fi
 : > "$CALLS"
-if STUB_IPV4_METHOD=static STUB_IP=10.0.0.5 STUB_CALLS="$CALLS" "$ROOT/bin/vibecaf" __dhcp_renew en0; then
+if STUB_IPV4_METHOD=static STUB_IP=10.0.0.5 STUB_CALLS="$CALLS" "$ROOT/bin/lidwise" __dhcp_renew en0; then
   echo "FAIL: renew claimed success for static IPv4" >&2; exit 1
 elif [ -s "$CALLS" ]; then
   echo "FAIL: static IPv4 was mutated" >&2; cat "$CALLS" >&2; exit 1

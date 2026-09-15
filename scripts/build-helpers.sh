@@ -30,5 +30,6 @@ build_helper() {
   fi
   mv "$WORK/$name" "$OUT/$name"
 }
-build_helper vibecaf-thermal ThermalState.swift
-if [ -f "$ROOT/src/AgentScan.swift" ]; then build_helper vibecaf-agent-scan-core ProcessRunner.swift AgentScan.swift; fi
+build_helper lidwise-thermal ThermalState.swift
+if [ -f "$ROOT/src/AgentScan.swift" ]; then build_helper lidwise-agent-scan-core ProcessRunner.swift AgentHooks.swift AgentScan.swift; fi
+build_helper lidwise-lid-probe LidProbeModel.swift LidProbe.swift

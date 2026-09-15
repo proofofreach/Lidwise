@@ -10,12 +10,14 @@ enum SessionPhase: String, Codable {
 enum PendingAction: Equatable {
     case turningOn
     case turningOff
+    case extending
     case saving
 
     var label: String {
         switch self {
         case .turningOn: return "Turning on…"
         case .turningOff: return "Turning off…"
+        case .extending: return "Adding 30 minutes…"
         case .saving: return "Saving…"
         }
     }
@@ -23,18 +25,42 @@ enum PendingAction: Equatable {
 
 struct AgentCounts: Codable, Equatable {
     var working: Int
+    var waiting: Int
     var quiet: Int
     var finished: Int
+    var failed: Int
 
     static let zero = AgentCounts(working: 0, quiet: 0, finished: 0)
 
-    var isEmpty: Bool { working == 0 && quiet == 0 && finished == 0 }
+    init(working: Int, quiet: Int, finished: Int, waiting: Int = 0, failed: Int = 0) {
+        self.working = working
+        self.waiting = waiting
+        self.quiet = quiet
+        self.finished = finished
+        self.failed = failed
+    }
+
+    enum CodingKeys: String, CodingKey { case working, waiting, quiet, finished, failed }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        working = try values.decode(Int.self, forKey: .working)
+        waiting = try values.decodeIfPresent(Int.self, forKey: .waiting) ?? 0
+        quiet = try values.decode(Int.self, forKey: .quiet)
+        finished = try values.decode(Int.self, forKey: .finished)
+        failed = try values.decodeIfPresent(Int.self, forKey: .failed) ?? 0
+    }
+
+    var isEmpty: Bool { working == 0 && waiting == 0 && quiet == 0 && finished == 0 && failed == 0 }
+    var needsAttention: Int { waiting + failed }
 
     var detail: String {
         var parts: [String] = []
         if working > 0 { parts.append("\(working) working") }
+        if waiting > 0 { parts.append("\(waiting) waiting") }
         if quiet > 0 { parts.append("\(quiet) quiet") }
         if finished > 0 { parts.append("\(finished) finished") }
+        if failed > 0 { parts.append("\(failed) failed") }
         return parts.joined(separator: " · ")
     }
 }
@@ -63,6 +89,38 @@ struct GoalCounts: Codable, Equatable {
     }
 }
 
+enum RestorationResult: String, Codable {
+    case verified
+    case failed
+    case unknown
+}
+
+struct SessionRecord: Codable, Equatable, Identifiable {
+    var sessionID: String
+    var startedAt: TimeInterval
+    var endedAt: TimeInterval
+    var deadline: TimeInterval
+    var reason: String
+    var restoration: RestorationResult
+    var batteryStart: Int?
+    var batteryEnd: Int?
+    var powerStart: String?
+    var powerEnd: String?
+
+    var id: String { sessionID }
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case startedAt = "started_at"
+        case endedAt = "ended_at"
+        case deadline, reason, restoration
+        case batteryStart = "battery_start"
+        case batteryEnd = "battery_end"
+        case powerStart = "power_start"
+        case powerEnd = "power_end"
+    }
+}
+
 struct State: Codable, Equatable {
     var schemaVersion: Int
     var phase: SessionPhase
@@ -73,6 +131,11 @@ struct State: Codable, Equatable {
     var durationSeconds: Int
     var defaultDurationSeconds: Int?
     var batteryFloor: Int
+    var defaultBatteryFloor: Int?
+    var requireAC: Bool?
+    var defaultRequireAC: Bool?
+    var canExtend: Bool?
+    var lastSession: SessionRecord?
     var powerSource: String?
     var batteryPercent: Int?
     var thermal: String?
@@ -111,6 +174,11 @@ struct State: Codable, Equatable {
         case durationSeconds = "duration_seconds"
         case defaultDurationSeconds = "default_duration_seconds"
         case batteryFloor = "battery_floor"
+        case defaultBatteryFloor = "default_battery_floor"
+        case requireAC = "require_ac"
+        case defaultRequireAC = "default_require_ac"
+        case canExtend = "can_extend"
+        case lastSession = "last_session"
         case powerSource = "power_source"
         case batteryPercent = "battery_percent"
         case thermal
@@ -131,6 +199,9 @@ struct State: Codable, Equatable {
          sessionID: String? = nil, startedAt: TimeInterval? = nil,
          deadline: TimeInterval? = nil, remainingSeconds: Int? = nil,
          durationSeconds: Int = 21_600, defaultDurationSeconds: Int? = nil, batteryFloor: Int = 20,
+         defaultBatteryFloor: Int? = nil, requireAC: Bool? = nil,
+         defaultRequireAC: Bool? = nil, canExtend: Bool? = nil,
+         lastSession: SessionRecord? = nil,
          powerSource: String? = nil, batteryPercent: Int? = nil,
          thermal: String? = nil, guardRunning: Bool = false,
          guardianRunning: Bool = false, recoveryReady: Bool = false,
@@ -150,6 +221,11 @@ struct State: Codable, Equatable {
         self.durationSeconds = durationSeconds
         self.defaultDurationSeconds = defaultDurationSeconds
         self.batteryFloor = batteryFloor
+        self.defaultBatteryFloor = defaultBatteryFloor
+        self.requireAC = requireAC
+        self.defaultRequireAC = defaultRequireAC
+        self.canExtend = canExtend
+        self.lastSession = lastSession
         self.powerSource = powerSource
         self.batteryPercent = batteryPercent
         self.thermal = thermal
@@ -174,9 +250,43 @@ struct State: Codable, Equatable {
     }
 
     var selectedDuration: Int { defaultDurationSeconds ?? durationSeconds }
+    var selectedBatteryFloor: Int { defaultBatteryFloor ?? batteryFloor }
+    var selectedRequireAC: Bool { defaultRequireAC ?? requireAC ?? false }
+    var attentionCount: Int { agents.claude.needsAttention + agents.codex.needsAttention }
+    var canAddThirtyMinutes: Bool {
+        guard ownsSession, canExtend == true, (remainingSeconds ?? 0) > 0,
+              let startedAt, let deadline else { return false }
+        return deadline + 1_800 <= startedAt + 21_600
+    }
 
     var ownsSession: Bool { phase == .ownedOn }
     var isExternallyHeld: Bool { phase == .externalOn }
+}
+
+struct SessionHistoryPayload: Codable, Equatable {
+    var schemaVersion: Int
+    var sessions: [SessionRecord]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case sessions
+    }
+}
+
+enum FeaturePayloadParser {
+    static func history(_ data: Data) throws -> SessionHistoryPayload {
+        let payload = try decode(SessionHistoryPayload.self, from: data, name: "history")
+        guard payload.schemaVersion == 1 else { throw StatusParseError.unsupportedSchema(payload.schemaVersion) }
+        guard payload.sessions.count <= 20 else {
+            throw StatusParseError.invalidPayload("history exceeds 20 sessions")
+        }
+        return payload
+    }
+
+    private static func decode<T: Decodable>(_ type: T.Type, from data: Data, name: String) throws -> T {
+        do { return try JSONDecoder().decode(type, from: data) }
+        catch { throw StatusParseError.invalidPayload("\(name): \(error.localizedDescription)") }
+    }
 }
 
 enum StatusParseError: LocalizedError, Equatable {
@@ -248,7 +358,7 @@ enum StateReconciler {
 // Optional observation has its own queue and never waits in the power-command path.
 final class ActivityRefreshWorker {
     private let runner: CommandRunning
-    private let queue = DispatchQueue(label: "app.closedlidawake.activity", qos: .utility)
+    private let queue = DispatchQueue(label: "app.lidwiseawake.activity", qos: .utility)
     private let lock = NSLock()
     private var pending = false
     private var latestCompletion: (() -> Void)?

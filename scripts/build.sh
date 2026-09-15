@@ -7,7 +7,7 @@ mkdir -p "$ROOT/.build"
 BUILD_DIR=$(mktemp -d "$ROOT/.build/app.XXXXXX")
 trap 'rm -rf "$BUILD_DIR"' EXIT
 DIST_DIR=${DIST_DIR:-"$ROOT/dist"}
-APP="$DIST_DIR/Closed-Lid Awake.app"
+APP="$DIST_DIR/Lidwise.app"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
@@ -16,19 +16,19 @@ ARCHS=${ARCHS:-"arm64 x86_64"}
 "$ROOT/scripts/source-manifest.sh" > "$BUILD_DIR/inputs-before.sha256"
 
 rm -rf "$APP"
-mkdir -p "$MACOS" "$RESOURCES/lib/vibecaf" "$CONTENTS/Helpers" "$ICONSET"
+mkdir -p "$MACOS" "$RESOURCES/lib/lidwise" "$CONTENTS/Helpers" "$ICONSET"
 HELPERS_DIR="$CONTENTS/Helpers" "$ROOT/scripts/build-helpers.sh"
 
-cp "$ROOT/src/ClosedLidAwake.swift" "$BUILD_DIR/main.swift"
+cp "$ROOT/src/Lidwise.swift" "$BUILD_DIR/main.swift"
 ui_sources=("$BUILD_DIR/main.swift")
 for source in "$ROOT"/src/*.swift; do
-  case "$(basename "$source")" in ClosedLidAwake.swift|ThermalState.swift|AgentScan.swift|makeicon.swift) continue ;; esac
+  case "$(basename "$source")" in Lidwise.swift|ThermalState.swift|AgentScan.swift|LidProbe.swift|makeicon.swift) continue ;; esac
   ui_sources+=("$source")
 done
 objects=()
 
 for arch in $ARCHS; do
-  output="$BUILD_DIR/ClosedLidAwake-$arch"
+  output="$BUILD_DIR/Lidwise-$arch"
   xcrun swiftc \
     -O \
     -target "$arch-apple-macosx13.0" \
@@ -42,15 +42,15 @@ for arch in $ARCHS; do
 done
 
 if [ "${#objects[@]}" -eq 1 ]; then
-  cp "${objects[0]}" "$MACOS/ClosedLidAwake"
+  cp "${objects[0]}" "$MACOS/Lidwise"
 else
-  xcrun lipo -create "${objects[@]}" -output "$MACOS/ClosedLidAwake"
+  xcrun lipo -create "${objects[@]}" -output "$MACOS/Lidwise"
 fi
 
 
-install -m 0755 "$ROOT/bin/vibecaf" "$RESOURCES/vibecaf"
-install -m 0755 "$ROOT/bin/vibecaf-agent-scan" "$RESOURCES/vibecaf-agent-scan"
-install -m 0644 "$ROOT"/lib/vibecaf/*.sh "$RESOURCES/lib/vibecaf/"
+install -m 0755 "$ROOT/bin/lidwise" "$RESOURCES/lidwise"
+install -m 0755 "$ROOT/bin/lidwise-agent-scan" "$RESOURCES/lidwise-agent-scan"
+install -m 0644 "$ROOT"/lib/lidwise/*.sh "$RESOURCES/lib/lidwise/"
 
 xcrun swiftc "$ROOT/src/makeicon.swift" -o "$BUILD_DIR/makeicon"
 "$BUILD_DIR/makeicon" "$BUILD_DIR/appicon.png"
@@ -74,11 +74,11 @@ make_icon 1024 icon_512x512@2x.png
 
 PLIST="$CONTENTS/Info.plist"
 /usr/bin/plutil -create xml1 "$PLIST"
-/usr/bin/plutil -insert CFBundleDisplayName -string "Closed-Lid Awake" "$PLIST"
-/usr/bin/plutil -insert CFBundleExecutable -string "ClosedLidAwake" "$PLIST"
+/usr/bin/plutil -insert CFBundleDisplayName -string "Lidwise" "$PLIST"
+/usr/bin/plutil -insert CFBundleExecutable -string "Lidwise" "$PLIST"
 /usr/bin/plutil -insert CFBundleIconFile -string "appicon" "$PLIST"
 /usr/bin/plutil -insert CFBundleIdentifier -string "app.closedlidawake.ClosedLidAwake" "$PLIST"
-/usr/bin/plutil -insert CFBundleName -string "Closed-Lid Awake" "$PLIST"
+/usr/bin/plutil -insert CFBundleName -string "Lidwise" "$PLIST"
 /usr/bin/plutil -insert CFBundlePackageType -string "APPL" "$PLIST"
 /usr/bin/plutil -insert CFBundleShortVersionString -string "$VERSION" "$PLIST"
 /usr/bin/plutil -insert CFBundleVersion -string "${BUILD_NUMBER:-1}" "$PLIST"

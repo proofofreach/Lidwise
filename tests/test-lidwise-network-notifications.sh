@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/vibecaf-network.XXXXXX")
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-network.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 export VIBECAF_STATE_DIR="$TEST_ROOT/state"
@@ -10,7 +10,7 @@ export VIBECAF_RUNTIME_DIR="$TEST_ROOT/run"
 export VIBECAF_NOTIFY_LOG="$TEST_ROOT/notifications.log"
 mkdir -p "$VIBECAF_RUNTIME_DIR"
 
-VIBECAF="$ROOT/bin/vibecaf"
+VIBECAF="$ROOT/bin/lidwise"
 
 # States are named tokens now, not 0/1/2. The rename is the point: the old code
 # collapsed "joined but the lease died" and "joined to nothing" into the same

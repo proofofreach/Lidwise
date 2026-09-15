@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/vibecaf-goals.XXXXXX")
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-goals.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 export HOME="$TEST_ROOT/home"
@@ -11,7 +11,7 @@ export VIBECAF_STATE_DIR="$TEST_ROOT/state"
 export VIBECAF_NOTIFY_LOG="$TEST_ROOT/notifications.log"
 mkdir -p "$HOME" "$VIBECAF_RUNTIME_DIR" "$VIBECAF_STATE_DIR"
 
-VIBECAF="$ROOT/bin/vibecaf"
+VIBECAF="$ROOT/bin/lidwise"
 
 if "$VIBECAF" goal add "Invalid PID" --pid 0 >/dev/null 2>&1; then
   echo "PID 0 must be rejected" >&2

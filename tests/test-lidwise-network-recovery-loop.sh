@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/vibecaf-network-loop.XXXXXX")
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-network-loop.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 BIN="$TEST_ROOT/bin"; mkdir -p "$BIN" "$TEST_ROOT/run"
 export VIBECAF_NETLOG="$TEST_ROOT/logs/network.log"
@@ -66,8 +66,8 @@ export VIBECAF_PMSET="$BIN/pmset"
 
 run_loop() {
   : > "$STUB_CALLS"
-  "$ROOT/bin/vibecaf" __netwatch >/dev/null
-  "$ROOT/bin/vibecaf" __observation >/dev/null
+  "$ROOT/bin/lidwise" __netwatch >/dev/null
+  "$ROOT/bin/lidwise" __observation >/dev/null
 }
 assert_no_write() {
   [ ! -s "$STUB_CALLS" ] || { echo "unexpected network write for $1:" >&2; cat "$STUB_CALLS" >&2; exit 1; }
@@ -112,9 +112,9 @@ assert_no_write 'recovery disabled'
 # invented token must degrade to unknown instead of feeding shell arithmetic or
 # presenting an old verdict as live.
 printf 'not-a-time\tportal\n' > "$VIBECAF_RUNTIME_DIR/network.state"
-grep -q '^Network: unknown$' <("$ROOT/bin/vibecaf" status)
+grep -q '^Network: unknown$' <("$ROOT/bin/lidwise" status)
 printf '1\tinvented-state\n' > "$VIBECAF_RUNTIME_DIR/network.state"
-grep -q '^Network: unknown$' <("$ROOT/bin/vibecaf" status)
+grep -q '^Network: unknown$' <("$ROOT/bin/lidwise" status)
 
 # wc output is padded on macOS. Trimming must still enforce the bound.
 VIBECAF_NETLOG_MAX_LINES=3 STUB_RADIO=On STUB_ASSOC=no STUB_IP= STUB_RIF= STUB_GW= run_loop
@@ -131,9 +131,9 @@ mkdir -p "$VIBECAF_STATE_DIR/config"
 chmod 700 "$VIBECAF_STATE_DIR/config"
 printf '1\n' > "$VIBECAF_STATE_DIR/config/recovery"
 STUB_DISABLE_MONITOR=1 STUB_RADIO=On STUB_ASSOC=yes STUB_IP=10.0.0.4 STUB_RIF=en0 STUB_GW=10.0.0.1 STUB_CODE=200 STUB_BODY='Success' \
-  "$ROOT/bin/vibecaf" __observation >/dev/null
+  "$ROOT/bin/lidwise" __observation >/dev/null
 [ ! -e "$VIBECAF_RUNTIME_DIR/network.state" ]
 # Even a cache published just as the preference changed is hidden while off.
 printf '%s\tonline\n' "$(date +%s)" > "$VIBECAF_RUNTIME_DIR/network.state"
-grep -q '^Network: unknown$' <("$ROOT/bin/vibecaf" status)
+grep -q '^Network: unknown$' <("$ROOT/bin/lidwise" status)
 echo 'network recovery loop: ok'

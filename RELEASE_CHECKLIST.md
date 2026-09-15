@@ -12,7 +12,7 @@ Do not publish or recommend it for unattended use until the gates below have evi
 - [x] Core failure/concurrency, observer, network, UI, and installer regression tests pass.
 - [x] Freeze the reviewed source commit, including the existing scanner correction (see candidate `CLASourceRevision`).
 - [ ] Version, changelog, source manifest, tag, release notes, and asset agree.
-- [x] Repository owner and private security-report route verified: proofofreach/ClosedLidAwake.
+- [x] Repository owner and private security-report route verified: proofofreach/Lidwise.
 - [x] MIT license is present; retain contributor attribution.
 
 ## Real-device evidence
@@ -33,7 +33,7 @@ Record the exact build hash, model/CPU, macOS version, and observation in
 
 ## Community distribution (selected)
 
-- [x] Validate all three universal native executables and the extracted archive with `verify-release.sh community`.
+- [x] Validate all four universal native executables and the extracted feature-revision archive with `verify-release.sh community`.
 - [ ] Test a quarantined download and Apple’s per-app Open Anyway flow on a clean supported Mac.
 - [ ] Label the GitHub release ad hoc signed and not notarized; include first-launch instructions.
 - [ ] Publish one verified asset and checksum; ensure `/releases/latest` resolves to it.
@@ -57,14 +57,14 @@ safety gates above still apply. No Apple membership purchase is authorized or re
 ```bash
 ./scripts/check.sh
 RELEASE_MODE=community ./scripts/package.sh
-./scripts/verify-release.sh community dist/Closed-Lid-Awake-1.2.0-macos-universal.zip
+./scripts/verify-release.sh community dist/Lidwise-1.2.0-macos-universal.zip
 ```
 
 After committing the reviewed source and configuring credentials in Keychain:
 
 ```bash
 SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-NOTARY_PROFILE="closed-lid-awake-notary" ./scripts/notarize.sh
+NOTARY_PROFILE="lidwise-notary" ./scripts/notarize.sh
 ```
 
 `notarize.sh` requires a clean committed tree, runs local checks, builds, submits,

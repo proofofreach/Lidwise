@@ -11,7 +11,7 @@ mkdir -p "$ROOT/.build"
 WORK=$(mktemp -d "$ROOT/.build/notarize.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 "$ROOT/scripts/build.sh"
-APP="$ROOT/dist/Closed-Lid Awake.app"
+APP="$ROOT/dist/Lidwise.app"
 /usr/bin/ditto -c -k --keepParent "$APP" "$WORK/submission.zip"
 xcrun notarytool submit "$WORK/submission.zip" --keychain-profile "$NOTARY_PROFILE" --wait
 xcrun stapler staple "$APP"
