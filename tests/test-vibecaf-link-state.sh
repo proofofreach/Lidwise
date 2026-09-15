@@ -30,7 +30,12 @@ case "${1:-}" in
   -getairportpower)      echo "Wi-Fi Power (en0): ${STUB_RADIO:-On}" ;;
   -listnetworkserviceorder)
     [ "${STUB_SVC:-yes}" = yes ] && printf '(1) Wi-Fi\n(Hardware Port: Wi-Fi, Device: en0)\n\n' ;;
-  -setdhcp) [ -n "${STUB_CALLS:-}" ] && echo "$*" >> "$STUB_CALLS" ;;
+  -getinfo)
+    case "${STUB_IPV4_METHOD:-dhcp}" in
+      dhcp) printf 'DHCP Configuration\nClient ID: %s\n' "${STUB_CLIENT_ID:-}" ;;
+      static) printf 'Manual Configuration\nIP address: 10.0.0.5\n' ;;
+    esac ;;
+  -renewdhcp|-setdhcp|-setairportpower) [ -n "${STUB_CALLS:-}" ] && echo "$*" >> "$STUB_CALLS" ;;
 esac
 exit 0
 EOF
@@ -102,46 +107,22 @@ STUB_RADIO=Off STUB_ASSOC=no STUB_IP= STUB_GW=192.168.2.1 STUB_RIF=en9 \
   expect online "another interface carries the default route"
 
 echo "dhcp renew:"
-# The renew must run at the service layer — networksetup writes to the Wi-Fi
-# *service* — never `ipconfig set <dev> DHCP`, whose interface-layer override
-# displaces the real service as primary and wedges the macOS reachability UI
-# ("No Internet Connection" while traffic flows). Found live on 2026-08-19.
+# Current macOS has no documented configuration-preserving lease renewal. The
+# no-IP diagnosis stays actionable but must make no DHCP or radio write.
 CALLS="$TEST_ROOT/setdhcp.calls"
-if STUB_IP=10.0.0.5 STUB_CALLS="$CALLS" "$ROOT/bin/vibecaf" __dhcp_renew en0; then
-  echo "  ok: renew succeeds once the device has an address"
+if STUB_IP=10.0.0.5 STUB_CLIENT_ID=custom-id STUB_CALLS="$CALLS" "$ROOT/bin/vibecaf" __dhcp_renew en0; then
+  echo "FAIL: renewal claimed a safe mutation path" >&2; exit 1
+elif [ -s "$CALLS" ]; then
+  echo "FAIL: DHCP client ID or service config was changed:" >&2; cat "$CALLS" >&2; exit 1
 else
-  echo "FAIL: renew reported failure on the success path" >&2; exit 1
-fi
-if [ "$(cat "$CALLS")" = "-setdhcp Wi-Fi vibecaf-renew
--setdhcp Wi-Fi" ]; then
-  echo "  ok: exactly two service-layer writes — set client-id, clear client-id"
-else
-  echo "FAIL: unexpected networksetup calls:" >&2; cat "$CALLS" >&2; exit 1
+  echo "  ok: unsupported lease renewal is diagnostic only"
 fi
 : > "$CALLS"
-if STUB_SVC=no STUB_IP=10.0.0.5 STUB_CALLS="$CALLS" "$ROOT/bin/vibecaf" __dhcp_renew en0; then
-  echo "FAIL: renew claimed success with no network service mapped" >&2; exit 1
+if STUB_IPV4_METHOD=static STUB_IP=10.0.0.5 STUB_CALLS="$CALLS" "$ROOT/bin/vibecaf" __dhcp_renew en0; then
+  echo "FAIL: renew claimed success for static IPv4" >&2; exit 1
 elif [ -s "$CALLS" ]; then
-  echo "FAIL: renew touched the service config despite resolving none" >&2; exit 1
+  echo "FAIL: static IPv4 was mutated" >&2; cat "$CALLS" >&2; exit 1
 else
-  echo "  ok: no service mapped -> fails cleanly, writes nothing"
+  echo "  ok: static IPv4 is read-only"
 fi
-case "$("$ROOT/bin/vibecaf" netdiag 2>/dev/null | grep '^DHCP renew:')" in
-  *"available (service: Wi-Fi)"*) echo "  ok: netdiag reports the resolved service" ;;
-  *) echo "FAIL: netdiag DHCP renew line wrong" >&2; exit 1 ;;
-esac
-
-echo "carrier:"
-carrier() { "$ROOT/bin/vibecaf" netdiag 2>/dev/null | awk -F': +' '/^carrier:/{print $2}'; }
-
-out=$(STUB_RADIO=On STUB_ASSOC=yes STUB_IP=172.20.10.4 STUB_GW=172.20.10.1 \
-      STUB_CODE=200 STUB_BODY=Success carrier)
-case "$out" in *"Personal Hotspot"*) echo "  ok: 172.20.10.x reads as the iPhone hotspot" ;;
-  *) echo "FAIL: hotspot subnet not detected — got '$out'" >&2; exit 1 ;; esac
-
-out=$(STUB_RADIO=On STUB_ASSOC=yes STUB_IP=192.168.0.9 STUB_GW=192.168.0.1 \
-      STUB_CODE=200 STUB_BODY=Success carrier)
-case "$out" in "Wi-Fi") echo "  ok: an ordinary subnet reads as Wi-Fi" ;;
-  *) echo "FAIL: wanted Wi-Fi — got '$out'" >&2; exit 1 ;; esac
-
 echo "link state: ok"

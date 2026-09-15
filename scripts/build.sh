@@ -3,20 +3,30 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 VERSION=${VERSION:-$(tr -d '[:space:]' < "$ROOT/VERSION")}
-BUILD_DIR="$ROOT/.build"
-DIST_DIR="$ROOT/dist"
+mkdir -p "$ROOT/.build"
+BUILD_DIR=$(mktemp -d "$ROOT/.build/app.XXXXXX")
+trap 'rm -rf "$BUILD_DIR"' EXIT
+DIST_DIR=${DIST_DIR:-"$ROOT/dist"}
 APP="$DIST_DIR/Closed-Lid Awake.app"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 ICONSET="$BUILD_DIR/appicon.iconset"
 ARCHS=${ARCHS:-"arm64 x86_64"}
+"$ROOT/scripts/source-manifest.sh" > "$BUILD_DIR/inputs-before.sha256"
 
-rm -rf "$BUILD_DIR" "$APP"
-mkdir -p "$BUILD_DIR" "$MACOS" "$RESOURCES" "$ICONSET"
+rm -rf "$APP"
+mkdir -p "$MACOS" "$RESOURCES/lib/vibecaf" "$CONTENTS/Helpers" "$ICONSET"
+HELPERS_DIR="$CONTENTS/Helpers" "$ROOT/scripts/build-helpers.sh"
 
+cp "$ROOT/src/ClosedLidAwake.swift" "$BUILD_DIR/main.swift"
+ui_sources=("$BUILD_DIR/main.swift")
+for source in "$ROOT"/src/*.swift; do
+  case "$(basename "$source")" in ClosedLidAwake.swift|ThermalState.swift|AgentScan.swift|makeicon.swift) continue ;; esac
+  ui_sources+=("$source")
+done
 objects=()
-thermal_objects=()
+
 for arch in $ARCHS; do
   output="$BUILD_DIR/ClosedLidAwake-$arch"
   xcrun swiftc \
@@ -24,17 +34,11 @@ for arch in $ARCHS; do
     -target "$arch-apple-macosx13.0" \
     -framework AppKit \
     -framework Carbon \
-    "$ROOT/src/ClosedLidAwake.swift" \
+    "${ui_sources[@]}" \
     -o "$output"
   objects+=("$output")
 
-  thermal_output="$BUILD_DIR/vibecaf-thermal-$arch"
-  xcrun swiftc \
-    -O \
-    -target "$arch-apple-macosx13.0" \
-    "$ROOT/src/ThermalState.swift" \
-    -o "$thermal_output"
-  thermal_objects+=("$thermal_output")
+
 done
 
 if [ "${#objects[@]}" -eq 1 ]; then
@@ -43,15 +47,10 @@ else
   xcrun lipo -create "${objects[@]}" -output "$MACOS/ClosedLidAwake"
 fi
 
-if [ "${#thermal_objects[@]}" -eq 1 ]; then
-  cp "${thermal_objects[0]}" "$RESOURCES/vibecaf-thermal"
-else
-  xcrun lipo -create "${thermal_objects[@]}" -output "$RESOURCES/vibecaf-thermal"
-fi
 
 install -m 0755 "$ROOT/bin/vibecaf" "$RESOURCES/vibecaf"
 install -m 0755 "$ROOT/bin/vibecaf-agent-scan" "$RESOURCES/vibecaf-agent-scan"
-chmod 0755 "$RESOURCES/vibecaf-thermal"
+install -m 0644 "$ROOT"/lib/vibecaf/*.sh "$RESOURCES/lib/vibecaf/"
 
 xcrun swiftc "$ROOT/src/makeicon.swift" -o "$BUILD_DIR/makeicon"
 "$BUILD_DIR/makeicon" "$BUILD_DIR/appicon.png"
@@ -86,6 +85,10 @@ PLIST="$CONTENTS/Info.plist"
 /usr/bin/plutil -insert LSMinimumSystemVersion -string "13.0" "$PLIST"
 /usr/bin/plutil -insert LSUIElement -bool true "$PLIST"
 /usr/bin/plutil -insert NSHighResolutionCapable -bool true "$PLIST"
+
+"$ROOT/scripts/source-manifest.sh" > "$RESOURCES/source-manifest.sha256"
+cmp "$BUILD_DIR/inputs-before.sha256" "$RESOURCES/source-manifest.sha256" || { echo "Release inputs changed during the build; retry after edits finish." >&2; exit 1; }
+/usr/bin/plutil -insert CLASourceRevision -string "$(git -C "$ROOT" rev-parse HEAD)" "$PLIST"
 
 if [ -n "${SIGNING_IDENTITY:-}" ]; then
   /usr/bin/codesign --force --options runtime --timestamp \

@@ -1,35 +1,30 @@
 # Changelog
 
-## 1.2.0 — unreleased
+## 1.2.0 — unreleased community candidate
 
-- Added automatic, local-only Claude Code and Codex session discovery.
-- Added agent activity and restart notifications without giving agents control
-  of the global work window.
-- Rebuilt the menu around a compact work-window and session-fleet card.
-- Restyled the whole menu as one dark panel: every action row now shares the
-  card's palette, with icons, hover and keyboard highlight, check indicators,
-  and shortcut glyphs; native key equivalents and accessibility are kept.
-- Reorganised the menu around progressive disclosure: it opens to the card,
-  the primary toggle, and Quit; startup options and tools live in an in-panel
-  Settings drawer that expands in place and reopens collapsed. Check rows
-  flip without closing the menu. If the icon is lost behind the notch, the
-  menu opens with the drawer expanded and the fix highlighted.
-- Agent discovery no longer counts MCP servers (`codex mcp-server`,
-  `claude mcp serve`) or crash-reporter helpers as connected sessions, which
-  produced a phantom "1 idle" Codex entry.
-- Added `vibecaf agents` commands for per-session and aggregate status.
-- Replaced the single radio-bounce network recovery with a state ladder:
-  `link_state` classifies `radio_off | unassoc | noip | portal | deadlink |
-  online` and each state gets its cheapest fix. A dead DHCP lease on a live
-  association now recovers in ~9s instead of minutes.
-- Renew DHCP at the service layer (`networksetup -setdhcp`), which needs no
-  root. Retired the `ipconfig` sudoers grant: its interface-layer renew wedged
-  the macOS Wi-Fi menu on "No Internet Connection" until reboot.
-- Left captive portals to a human (grace period, never a radio bounce) and
-  gave wedged-but-associated links a grace period before escalating.
-- Added `vibecaf netdiag`, a read-only dry run of the recovery ladder, and an
-  iPhone-hotspot indicator (by subnet — macOS redacts the SSID) to status and
-  the menu bar.
+- Add transactional session ownership, bounded duration settings, verified sleep
+  restoration, private runtime state, and process identity checks.
+- Distinguish unknown and externally controlled sleep state; preserve another
+  tool's hold unless the user explicitly overrides it.
+- Add versioned JSON status and read-only setup diagnostics.
+- Improve the dark menu panel with verified command results, duration controls,
+  optional Activity, coherent startup settings, and explicit quit choices.
+- Observe Claude Code and Codex locally; quiet sessions no longer imply completion.
+  Preserve exclusion of browser native-message hosts and MCP helper processes.
+- Replace automatic DHCP and Wi-Fi mutations with read-only network diagnosis.
+  Existing network configuration and intentional radio-off choices are preserved.
+- Stage installations and roll back failures. Find the installed helper during
+  removal even if its CLI wrapper is missing.
+- Run the per-user recovery job in the system launchd domain, as the user, to
+  support recovery across logout. Real-device lifecycle validation is pending.
+- Move native helpers to Contents/Helpers, sign embedded code before the bundle,
+  and verify the extracted archive against a source-input manifest.
+
+The selected distribution route is a free GitHub community build, ad hoc signed
+and not notarized. Apple Developer membership and App Store publication are optional.
+
+This candidate is not yet certified for public unattended use. See RELEASE_CHECKLIST.md
+and docs/IMPLEMENTATION_STATUS.md for outstanding evidence.
 
 ## 1.1.0 — 2026-08-14
 

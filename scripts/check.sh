@@ -1,39 +1,19 @@
 #!/bin/bash
 set -euo pipefail
-
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-APP="$ROOT/dist/Closed-Lid Awake.app"
-
-for script in "$ROOT"/bin/vibecaf*; do /bin/bash -n "$script"; done
-for script in "$ROOT"/scripts/*.sh; do /bin/bash -n "$script"; done
-for test_script in "$ROOT"/tests/*.sh; do /bin/bash -n "$test_script"; done
-for test_script in "$ROOT"/tests/*.sh; do "$test_script"; done
-xcrun swiftc -typecheck -framework AppKit -framework Carbon \
-  "$ROOT/src/ClosedLidAwake.swift"
-xcrun swiftc -typecheck "$ROOT/src/ThermalState.swift"
-xcrun swiftc -typecheck "$ROOT/src/makeicon.swift"
-
-"$ROOT/scripts/build.sh"
-/usr/bin/codesign --verify --deep --strict "$APP"
-/usr/bin/plutil -lint "$APP/Contents/Info.plist"
-
-arches=$(/usr/bin/lipo -archs "$APP/Contents/MacOS/ClosedLidAwake")
-thermal_arches=$(/usr/bin/lipo -archs "$APP/Contents/Resources/vibecaf-thermal")
-for required in arm64 x86_64; do
-  case " $arches " in
-    *" $required "*) ;;
-    *) echo "Missing architecture: $required" >&2; exit 1 ;;
-  esac
-  case " $thermal_arches " in
-    *" $required "*) ;;
-    *) echo "Thermal helper missing architecture: $required" >&2; exit 1 ;;
-  esac
+mkdir -p "$ROOT/.build"
+WORK=$(mktemp -d "$ROOT/.build/check.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+for script in "$ROOT"/bin/vibecaf* "$ROOT"/lib/vibecaf/*.sh "$ROOT"/scripts/*.sh "$ROOT"/tests/*.sh; do /bin/bash -n "$script"; done
+"$ROOT/scripts/build-helpers.sh"
+for test_script in "$ROOT"/tests/*.sh; do
+  [ "$(basename "$test_script")" = release-verifier-cases.sh ] && continue
+  "$test_script"
 done
-
-if rg -n '/Users/[^/]+|com\.k\.|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|api[_-]?key|access[_-]?token' \
-  "$ROOT" --glob '!dist/**' --glob '!.build/**' --glob '!scripts/check.sh'; then
-  echo "Potential private or machine-specific content found." >&2
-  exit 1
+DIST_DIR="$WORK/dist" "$ROOT/scripts/build.sh"
+DIST_DIR="$WORK/dist" SKIP_BUILD=1 "$ROOT/scripts/package.sh"
+"$ROOT/tests/release-verifier-cases.sh" "$WORK/dist/Closed-Lid-Awake-$(tr -d '[:space:]' < "$ROOT/VERSION")-macos-universal.zip"
+if rg -n 'BEGIN (RSA|OPENSSH|EC) PRIVATE KEY' "$ROOT/bin" "$ROOT/src" "$ROOT/lib" "$ROOT/docs"; then
+  echo 'Potential private key found' >&2; exit 1
 fi
-
-echo "Checks passed for: $arches"
+echo 'Local tests, universal build, and extracted development archive checks passed.'
