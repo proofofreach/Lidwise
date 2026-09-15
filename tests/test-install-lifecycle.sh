@@ -125,4 +125,4 @@ echo off > "$WORK/phase"
 echo external-on > "$WORK/phase"
 "$ROOT/scripts/uninstall.sh" > "$WORK/output" 2>&1 || { cat "$WORK/output"; exit 1; }
 [ "$(cat "$WORK/phase")" = external-on ] && [ ! -e "$APP" ]
-echo 'install staging, auth/copy failure, rollback/retained backup, required helper, state refusal, partial/external uninstall: ok' 
+echo 'install staging, auth/copy failure, rollback/retained backup, required helper, state refusal, partial/external uninstall: ok'

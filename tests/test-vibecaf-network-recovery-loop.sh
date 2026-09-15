@@ -123,4 +123,4 @@ rm "$VIBECAF_RUNTIME_DIR/network.state"
 ln -s "$TEST_ROOT/sentinel" "$VIBECAF_RUNTIME_DIR/network.state"
 STUB_RADIO=On STUB_ASSOC=no STUB_IP= STUB_RIF= STUB_GW= run_loop || true
 [ "$(cat "$TEST_ROOT/sentinel")" = preserve ]
-echo 'network recovery loop: ok'  
+echo 'network recovery loop: ok'
