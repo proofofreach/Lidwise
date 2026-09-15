@@ -1,13 +1,13 @@
-# Closed-Lid Awake
+# Lidwise
 
 <div align="center">
 
-<img src="assets/app-icon.png" alt="Closed-Lid Awake icon" width="240">
+<img src="assets/lidwise-hero.png" alt="Lidwise — Close the lid. Keep going." width="100%">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-blue.svg)](https://www.apple.com/macos/)
 [![Universal](https://img.shields.io/badge/Mac-Apple%20Silicon%20%2B%20Intel-black.svg)](#requirements)
-[![GitHub release](https://img.shields.io/github/v/release/ProofOfReach/ClosedLidAwake)](https://github.com/ProofOfReach/ClosedLidAwake/releases/latest)
+[![GitHub release](https://img.shields.io/github/v/release/proofofreach/Lidwise)](https://github.com/proofofreach/Lidwise/releases/latest)
 
 ## Close the lid. Keep the run alive.
 
@@ -15,11 +15,16 @@
 
 ### Quick install
 
-[Download the latest release](https://github.com/ProofOfReach/ClosedLidAwake/releases/latest) → Unzip → Run `./install.sh`
+[Download the latest release](https://github.com/proofofreach/Lidwise/releases/latest) → Unzip → Run `./install.sh`
 
 </div>
 
 ---
+
+> **Renamed to Lidwise.** Existing downloads still install `Closed-Lid Awake.app`
+> and the `vibecaf` command. The instructions below retain those names so they
+> work with the published build. The renamed 1.2.0 candidate is still undergoing
+> local testing and has not been released.
 
 ## TL;DR
 
@@ -27,14 +32,14 @@
 a separate clamshell-sleep path. Your overnight agent run can still vanish the
 moment the lid closes.
 
-**The solution:** Closed-Lid Awake pairs `pmset disablesleep` with
+**The solution:** Lidwise pairs `pmset disablesleep` with
 `caffeinate`, puts the controls in your menu bar, and restores normal sleep
 automatically at 20% battery or after six hours.
 
 Turn it on. Close the lid. Check the result from another device.
 
 > [!CAUTION]
-> Closed-Lid Awake prevents normal sleep. **Never put an awake Mac in a bag,
+> Lidwise prevents normal sleep. **Never put an awake Mac in a bag,
 > sleeve, drawer, or other enclosed space.** Keep it on a hard, ventilated
 > surface with clear airflow.
 
@@ -54,10 +59,10 @@ Turn it on. Close the lid. Check the result from another device.
 ## Why not just use `caffeinate`?
 
 `caffeinate` solves idle sleep. It does **not** reliably solve lid-close sleep.
-Closed-Lid Awake coordinates both macOS mechanisms and adds the controls needed
+Lidwise coordinates both macOS mechanisms and adds the controls needed
 for unattended use.
 
-| Capability | Normal macOS | `caffeinate` | Closed-Lid Awake |
+| Capability | Normal macOS | `caffeinate` | Lidwise |
 |---|:---:|:---:|:---:|
 | Allows normal idle sleep | Yes | No | No |
 | Keeps running with lid closed | No | No | **Yes** |
@@ -70,7 +75,7 @@ for unattended use.
 ## Quick start
 
 ```text
-1. Install Closed-Lid Awake
+1. Install Lidwise
 2. Open it from ~/Applications
 3. Click the moon icon and choose “Turn On”
 4. Confirm that the menu reports “Awake mode: ON”
@@ -108,7 +113,7 @@ No Xcode or developer tools required.
 > the source and [security model](SECURITY.md) before granting access.
 
 1. Download the ZIP from
-   [Releases](https://github.com/ProofOfReach/ClosedLidAwake/releases/latest).
+   [Releases](https://github.com/proofofreach/Lidwise/releases/latest).
 2. Unzip it.
 3. Open Terminal in the extracted directory.
 4. Run:
@@ -151,8 +156,8 @@ To install without the rule:
 Building requires the Xcode Command Line Tools.
 
 ```bash
-git clone https://github.com/ProofOfReach/ClosedLidAwake.git
-cd ClosedLidAwake
+git clone https://github.com/proofofreach/Lidwise.git
+cd Lidwise
 ./scripts/check.sh
 ./scripts/package.sh
 ```
@@ -228,7 +233,7 @@ Power: AC 100%
 
 ## Safety behavior
 
-Closed-Lid Awake reduces risk; it cannot eliminate it.
+Lidwise reduces risk; it cannot eliminate it.
 
 | Guardrail | Default | Purpose |
 |---|---:|---|
@@ -364,7 +369,7 @@ sudo pmset -a disablesleep 0
 
 ### Is this the same as `caffeinate`?
 
-No. `caffeinate` blocks idle sleep. Closed-Lid Awake also controls the
+No. `caffeinate` blocks idle sleep. Lidwise also controls the
 clamshell-sleep setting used when the lid closes.
 
 ### Is the administrator rule safe?

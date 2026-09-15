@@ -23,6 +23,7 @@ cp "$ROOT/README.md" "$ROOT/SECURITY.md" "$ROOT/RELEASE_CHECKLIST.md" \
   "$ROOT/CHANGELOG.md" "$ROOT/LICENSE" "$STAGE/"
 mkdir -p "$STAGE/assets"
 cp "$ROOT/assets/app-icon.png" "$STAGE/assets/"
+cp "$ROOT/assets/lidwise-hero.png" "$STAGE/assets/"
 chmod 0755 "$STAGE/install.sh" "$STAGE/uninstall.sh"
 
 (cd "$(dirname "$STAGE")" && /usr/bin/zip -qry -X "$ZIP" "$NAME")
