@@ -8,7 +8,7 @@ Do not publish or recommend it for unattended use until the gates below have evi
 ## Source and local verification
 
 - [x] Independent implementation review completed; findings fixed or adjudicated with evidence.
-- [x] `./scripts/check.sh` passes for the final implementation; subsequent edits only record verification and release notes.
+- [x] `./scripts/check.sh` passes, including the Desktop parser and off-state activity follow-ups.
 - [x] Core failure/concurrency, observer, network, UI, and installer regression tests pass.
 - [x] Freeze the reviewed source commit, including the existing scanner correction (see candidate `CLASourceRevision`).
 - [ ] Version, changelog, source manifest, tag, release notes, and asset agree.

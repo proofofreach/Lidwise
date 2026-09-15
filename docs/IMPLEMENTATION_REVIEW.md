@@ -88,7 +88,7 @@ its assertions that observation preserves session files remain intact.
 
 ## Remaining evidence
 
-The real-device matrix, quarantined download validation and publication remain pending. The original daily-use installation has not been replaced. No release has
+The remaining real-device matrix, quarantined download validation and publication are pending. User-authorized local upgrades and supervised power tests have completed. No release has
 been published. See [hardware record](HARDWARE_VALIDATION.md) and
 [release gates](../RELEASE_CHECKLIST.md).
 
@@ -105,3 +105,17 @@ discovery suite and full `scripts/check.sh` pass. Independent Sol review of the
 Astra-authored patch: **ship**, no findings. The installed power-tested candidate
 remains identifiable by its original revision; this follow-up changes only parser
 behavior and its tests, plus release documentation.
+
+## Off-state activity follow-up
+
+The UI now runs a separate bounded, coalesced activity refresh while awake mode is
+off. Machine status remains cache-only, and the refresh performs no power mutation.
+Temperature display labels map system states to Normal, Warm, High and Critical.
+
+Scoped Sol review found two callback-ordering defects. The first amendment rejects
+an observation callback after an intervening mutation or refresh. The second keeps
+the newest coalesced callback so an overlapping refresh still receives scan results.
+Regression tests cover both interleavings, nonblocking execution, owned-session
+skipping and observation-only command arguments. UI model/layout checks pass.
+Independent Sol ratification confirmed the requested amendments with no remaining
+problem in their scope.

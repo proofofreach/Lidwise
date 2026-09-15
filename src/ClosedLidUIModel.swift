@@ -77,6 +77,15 @@ struct State: Codable, Equatable {
     var powerSource: String?
     var batteryPercent: Int?
     var thermal: String?
+    var thermalLabel: String {
+        switch thermal {
+        case "nominal": return "Normal"
+        case "fair": return "Warm"
+        case "serious": return "High"
+        case "critical": return "Critical"
+        default: return "Temperature unknown"
+        }
+    }
     var guardRunning: Bool
     var guardianRunning: Bool
     var recoveryReady: Bool
@@ -260,6 +269,35 @@ enum StateReconciler {
 
 protocol CommandRunning {
     func run(executable: String, arguments: [String], timeout: TimeInterval) -> CommandResult
+}
+
+// Optional observation has its own queue and never waits in the power-command path.
+final class ActivityRefreshWorker {
+    private let runner: CommandRunning
+    private let queue = DispatchQueue(label: "app.closedlidawake.activity", qos: .utility)
+    private let lock = NSLock()
+    private var pending = false
+    private var latestCompletion: (() -> Void)?
+
+    init(runner: CommandRunning) { self.runner = runner }
+
+    func refreshIfNeeded(ownedSession: Bool, executable: String, completion: @escaping () -> Void) {
+        guard !ownedSession else { return } // An owned session already has an observer.
+        lock.lock()
+        latestCompletion = completion
+        guard !pending else { lock.unlock(); return }
+        pending = true
+        lock.unlock()
+        queue.async {
+            _ = self.runner.run(executable: executable, arguments: ["__observation_once"], timeout: 20)
+            self.lock.lock()
+            self.pending = false
+            let completion = self.latestCompletion
+            self.latestCompletion = nil
+            self.lock.unlock()
+            completion?()
+        }
+    }
 }
 
 struct ProcessRunner: CommandRunning {

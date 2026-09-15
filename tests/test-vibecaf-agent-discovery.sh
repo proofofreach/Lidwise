@@ -106,6 +106,19 @@ printf '%s\n' \
 summary=$("$VIBECAF" agents --summary)
 grep -q '^Claude Code: 1 working · 1 quiet · 0 finished$' <<< "$summary"
 
+# The menu can refresh a stale cache without enabling awake mode or reading pmset.
+cat > "$TEST_ROOT/forbidden-pmset" <<'EOF'
+#!/bin/bash
+printf called > "$VIBECAF_STATE_DIR/pmset-called"
+exit 1
+EOF
+chmod 0755 "$TEST_ROOT/forbidden-pmset"
+rm -f "$VIBECAF_RUNTIME_DIR/agent-state/sessions.tsv"
+VIBECAF_PMSET="$TEST_ROOT/forbidden-pmset" "$VIBECAF" __observation_once
+[ -s "$VIBECAF_RUNTIME_DIR/agent-state/sessions.tsv" ]
+[ ! -e "$VIBECAF_STATE_DIR/pmset-called" ]
+[ ! -e "$VIBECAF_STATE_DIR/session/active" ]
+
 # Seed incomplete session residue. Agent transitions must preserve it.
 mkdir -p "$VIBECAF_STATE_DIR/session"
 printf '%s\n' active > "$VIBECAF_STATE_DIR/session/active"

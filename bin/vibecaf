@@ -508,4 +508,5 @@ case "$command" in on) shift; duration=$(config_duration); if [ "$#" -gt 0 ]; th
   netdiag) netdiag ;; goals) goals_list "${2:-}" ;; agents) agents_list "${2:-}" ;; goal) shift; goal_command "$@" ;;
   __netwatch) netwatch_loop ;; __guard) guard_loop ;; __guard_once) guard_check_once ;; __guardian) guardian_loop ;; __guardian_once) guardian_check_once ;;
   __network_transition) notify_network_transition "${2:-}" "${3:-}" ;; __dhcp_renew) dhcp_renew "${2:-$(wifi_device)}" ;;
-  __observation) observation_loop ;; __maintenance) shift; maintenance "$@" ;; *) usage; exit 2 ;; esac
+  __observation) observation_loop ;; __observation_once) goals_refresh; agents_ensure_cache ;;
+  __maintenance) shift; maintenance "$@" ;; *) usage; exit 2 ;; esac

@@ -2,6 +2,8 @@
 
 ## 1.2.0 — unreleased community candidate
 
+- Refresh agent activity while awake mode is off, without delaying power controls.
+- Show plain temperature labels: Normal, Warm, High, and Critical.
 - Recognize resumed Codex Desktop response-item activity so a previous completed
   turn does not leave an active task labeled finished.
 

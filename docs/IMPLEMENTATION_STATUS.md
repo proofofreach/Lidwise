@@ -7,7 +7,7 @@ Working record for the 1.2 candidate. **Public launch remains pending verificati
 | Session safety | Transactional ownership, kernel mutation lock, bounded recovery takeover, conservative incomplete-state handling, session-bound health evidence and versioned JSON. Focused core and safety suites passed; final amendments independently endorsed. |
 | Native UI | Typed state, bounded command execution, reconciliation after failures, next-session duration, settings, and dynamic menu sizing. Model, inherited-pipe timeout, layout and accessibility-action tests passed. |
 | Network preservation | Automatic DHCP/radio mutations removed. Read-only observation loop, bounded private logs and atomic private cache pass isolated regression tests. |
-| Agent activity | Cache-only machine status; bounded native JSONL parsing distinguishes quiet activity from explicit completion and excludes child sessions. Parser and observer tests passed. |
+| Agent activity | Cache-only machine status; bounded native JSONL parsing distinguishes quiet activity from explicit completion and excludes child sessions. A separate coalesced UI worker refreshes activity while awake mode is off; stale callbacks cannot supersede a power mutation. Parser, observer and UI worker tests passed. |
 | Lifecycle | Staged install, authorization before mutation, shared lock, rollback with retained backup on rollback failure, required helpers and conservative removal. Isolated lifecycle tests passed; real launchd behavior pending. |
 | Build/archive | Universal app and two native helpers, inside-out signing, source manifests and extracted archive validation. Negative tests cover hidden/extra files, missing scanner, thin executable and stale documentation. Full local check, universal build and all negative archive tests passed. |
 | Documentation | Shorter README; separate CLI, network, troubleshooting and competitor guides; explicit community distribution and hardware gates. |
@@ -18,8 +18,10 @@ Working record for the 1.2 candidate. **Public launch remains pending verificati
 Independent implementation review and ratification are complete. The full local check passed after the final core fixes. Real-device
 validation, quarantined community-download testing, and release publication remain
 pending. Developer ID signing/notarization is optional: the user selected the free,
-non-notarized GitHub release route. The existing daily-use installation has not been
-replaced. No release has been published.
+non-notarized GitHub release route. The user authorized local installation and supervised testing. AC/battery lid
+operation, normal lid sleep after off, timer restoration and guard-crash recovery
+now have evidence in `HARDWARE_VALIDATION.md`. Remaining matrix cases and publication
+are still pending.
 
 ## Scope
 
@@ -45,7 +47,7 @@ The original launch blockers map to the independent review and test evidence:
 2. Ownership: idempotence, kernel serialization, malformed policy, incomplete
    activation, failed restoration and external-hold preservation tests pass.
 3. Runtime/process safety: private atomic files, identity checks and protected-child
-   takeover tests pass. Actual privileged recovery remains a hardware gate.
+   takeover tests pass. Actual timer and guard-crash restoration passed; remaining recovery cases are listed in the hardware record.
 4. Network: configuration-changing repair was removed because no safe supported
    renewal operation was established; full read-only loop tests pass.
 5. Lifecycle: isolated install/rollback/removal tests and nested universal signature
@@ -58,5 +60,5 @@ The original launch blockers map to the independent review and test evidence:
 Daily-use improvements and documentation are implemented. Live menu keyboard,
 VoiceOver and accessibility settings still require the real-device pass. Optional
 notarization is superseded for this candidate by the user's free community choice.
-No automatic continuation is permission to replace the daily-use installation or
-perform the pending disruptive tests.
+The user subsequently authorized local installation and supervised testing; the
+record distinguishes completed cases from remaining disruptive tests.

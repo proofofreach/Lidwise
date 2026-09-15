@@ -148,11 +148,73 @@ struct ClosedLidUIModelTests {
               "next-session duration must not change the active session policy")
     }
 
+    static func testActivityRefreshWorker() {
+        final class BlockingRunner: CommandRunning {
+            let started = DispatchSemaphore(value: 0)
+            let release = DispatchSemaphore(value: 0)
+            private let lock = NSLock()
+            private var calls: [[String]] = []
+            var arguments: [[String]] { lock.lock(); defer { lock.unlock() }; return calls }
+            func run(executable: String, arguments: [String], timeout: TimeInterval) -> CommandResult {
+                lock.lock(); calls.append(arguments); lock.unlock()
+                started.signal()
+                _ = release.wait(timeout: .now() + 3)
+                return CommandResult(stdout: Data(), stderr: Data(), exitCode: 0, timedOut: false, launchError: nil)
+            }
+        }
+        let runner = BlockingRunner()
+        let worker = ActivityRefreshWorker(runner: runner)
+        let completed = DispatchSemaphore(value: 0)
+        let gate = RevisionGate()
+        let observationRevision = gate.issue()
+        let deliveryQueue = DispatchQueue(label: "test.activity.delivery")
+        var deliveredRefresh = false
+        var deliveredLatestCompletion = false
+        worker.refreshIfNeeded(ownedSession: true, executable: "fixture") { completed.signal() }
+        check(runner.arguments.isEmpty, "owned sessions already have an observer")
+        let start = Date()
+        worker.refreshIfNeeded(ownedSession: false, executable: "fixture") {
+            deliveryQueue.async {
+                if gate.accepts(observationRevision) { deliveredRefresh = true }
+                completed.signal()
+            }
+        }
+        check(Date().timeIntervalSince(start) < 0.5, "off-state observation must return without waiting for the scanner")
+        check(runner.started.wait(timeout: .now() + 2) == .success, "off-state observation must run")
+        let latestRevision = deliveryQueue.sync { gate.issue() }
+        worker.refreshIfNeeded(ownedSession: false, executable: "fixture") {
+            deliveryQueue.async {
+                deliveredLatestCompletion = true
+                if gate.accepts(latestRevision) { deliveredRefresh = true }
+                completed.signal()
+            }
+        }
+        check(runner.arguments.count == 1, "overlapping activity refreshes must coalesce")
+        runner.release.signal()
+        check(completed.wait(timeout: .now() + 2) == .success, "activity completion must request a fresh status")
+        check(deliveryQueue.sync { deliveredLatestCompletion && deliveredRefresh }, "coalesced scan must deliver the newest refresh callback")
+        deliveryQueue.sync { deliveredRefresh = false }
+        let beforeMutation = deliveryQueue.sync { gate.issue() }
+        worker.refreshIfNeeded(ownedSession: false, executable: "fixture") {
+            deliveryQueue.async {
+                if gate.accepts(beforeMutation) { deliveredRefresh = true }
+                completed.signal()
+            }
+        }
+        check(runner.started.wait(timeout: .now() + 2) == .success, "later refreshes must remain available")
+        deliveryQueue.sync { _ = gate.issue() } // Mutation finishes before the scan.
+        runner.release.signal()
+        check(completed.wait(timeout: .now() + 2) == .success, "second refresh must finish")
+        check(!deliveryQueue.sync { deliveredRefresh }, "late observation must not refresh over a reconciled mutation error")
+        check(runner.arguments.allSatisfy { $0 == ["__observation_once"] }, "activity worker must never send power mutations")
+    }
+
     static func main() {
         testStatusParsing()
         testProcessResults()
         testPendingAndStaleResults()
         testMutationReconciliation()
+        testActivityRefreshWorker()
         if failures > 0 { exit(1) }
         print("ClosedLidUIModelTests: PASS")
     }

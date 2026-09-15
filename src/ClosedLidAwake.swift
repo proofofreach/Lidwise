@@ -381,12 +381,12 @@ struct WorkWindowCard: View {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 14) {
                     safetyItem("bolt.fill", powerDetail)
-                    safetyItem("thermometer.medium", state.thermal ?? "thermal unknown")
+                    safetyItem("thermometer.medium", state.thermalLabel)
                     safetyItem(state.networkState == "online" ? "wifi" : "wifi.slash", networkDetail)
                 }
                 VStack(alignment: .leading, spacing: 6) {
                     safetyItem("bolt.fill", powerDetail)
-                    safetyItem("thermometer.medium", state.thermal ?? "thermal unknown")
+                    safetyItem("thermometer.medium", state.thermalLabel)
                     safetyItem(state.networkState == "online" ? "wifi" : "wifi.slash", networkDetail)
                 }
             }
@@ -652,6 +652,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var state = State()
     let cardModel = WorkWindowCardModel(state: State())
     let runner: CommandRunning = ProcessRunner()
+    lazy var activityWorker = ActivityRefreshWorker(runner: runner)
     let mutationQueue = DispatchQueue(label: "app.closedlidawake.mutations", qos: .userInitiated)
     let revisionGate = RevisionGate()
     var timer: Timer?
@@ -964,9 +965,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return img
     }
 
-    func refresh(probeNet: Bool = false) {
+    func refresh(probeNet: Bool = false, includeActivity: Bool = true) {
         guard state.pending == nil else { return }
         let revision = revisionGate.issue()
+        if includeActivity {
+            activityWorker.refreshIfNeeded(ownedSession: state.phase == .ownedOn, executable: vibecafPath) { [weak self] in
+                DispatchQueue.main.async {
+                    guard let self, self.revisionGate.accepts(revision), self.state.pending == nil else { return }
+                    self.refresh(includeActivity: false)
+                }
+            }
+        }
         DispatchQueue.global(qos: .utility).async {
             var arguments = ["status", "--json"]
             if probeNet { arguments.append("--net") }
@@ -1427,7 +1436,7 @@ private var previewState: State = {
     case "pending":
         state.phase = .off; state.pending = .turningOn
     case "battery":
-        state.powerSource = "Battery"; state.batteryPercent = 24; state.thermal = "elevated"
+        state.powerSource = "Battery"; state.batteryPercent = 24; state.thermal = "serious"
         state.networkState = "offline"; state.networkDetail = "Wi-Fi has no route"
         state.issues = ["Recovery authorization is unavailable.", "Thermal helper is missing."]
         state.recoveryReady = false
