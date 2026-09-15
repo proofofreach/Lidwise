@@ -2,6 +2,9 @@
 
 ## 1.2.0 — unreleased community candidate
 
+- Recognize resumed Codex Desktop response-item activity so a previous completed
+  turn does not leave an active task labeled finished.
+
 - Add transactional session ownership, bounded duration settings, verified sleep
   restoration, private runtime state, and process identity checks.
 - Distinguish unknown and externally controlled sleep state; preserve another

@@ -91,3 +91,17 @@ its assertions that observation preserves session files remain intact.
 The real-device matrix, quarantined download validation and publication remain pending. The original daily-use installation has not been replaced. No release has
 been published. See [hardware record](HARDWARE_VALIDATION.md) and
 [release gates](../RELEASE_CHECKLIST.md).
+
+## Codex Desktop follow-up
+
+Local testing found an active Desktop task mislabeled finished. Its current
+`response_item` activity did not clear a prior `task_complete` marker. The parser
+now recognizes Desktop reasoning, calls, outputs and user/assistant messages;
+system messages and metadata do not revive completed turns. A later explicit
+completion remains authoritative. Child exclusion is unchanged.
+
+The regression failed before the fix and passed afterward. The native parser,
+discovery suite and full `scripts/check.sh` pass. Independent Sol review of the
+Astra-authored patch: **ship**, no findings. The installed power-tested candidate
+remains identifiable by its original revision; this follow-up changes only parser
+behavior and its tests, plus release documentation.

@@ -38,6 +38,12 @@ do {
                   let subtype = object["subtype"] as? String,
                   ["success", "completed"].contains(subtype) {
             marker = "finished"
+        } else if arguments[1] == "codex" && type == "response_item" &&
+                    (["reasoning", "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"].contains(event ?? "") ||
+                     (event == "message" && ["user", "assistant"].contains(payload?["role"] as? String ?? ""))) {
+            // Desktop writes resumed-turn activity as response items. Metadata
+            // alone must not revive an earlier completed turn.
+            marker = "working"
         } else if ["assistant", "user", "tool"].contains(type) ||
                     (type == "event_msg" && ["user_message", "agent_reasoning", "agent_message", "function_call", "custom_tool_call"].contains(event ?? "")) {
             marker = "working"
