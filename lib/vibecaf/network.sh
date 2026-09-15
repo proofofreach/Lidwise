@@ -103,6 +103,7 @@ network_cache_read() { # stdout: timestamp<TAB>token
 
 network_status_token() {
   local ts token
+  network_recovery_enabled || { echo unknown; return; }
   IFS=$'\t' read -r ts token < <(network_cache_read) || { echo unknown; return; }
   printf '%s\n' "$token"
 }
@@ -142,38 +143,48 @@ dhcp_renew() {
 
 network_sleep() { [ "${VIBECAF_NETWATCH_NO_SLEEP:-0}" = 1 ] || sleep "$1"; }
 
-# The loop is bounded observation. It observes portal, upstream, Ethernet, VPN,
-# unknown-probe, radio-off, and lease failures without changing networking.
-netwatch_loop() {
-  local dev st last_st='' route_if noip_reported=0 radio_off_until=0 ticks=0 now
+# One read-only observation step, shared by the combined worker and diagnostic loop.
+# Transition history belongs to the worker, not a second persistent process.
+network_observe_reset() {
+  NETWORK_LAST_STATE=''; NETWORK_NOIP_REPORTED=0; NETWORK_RADIO_OFF_UNTIL=0
+}
+network_observe_once() {
+  local dev st route_if now
   dev=$(wifi_device)
-  [ -n "$dev" ] || { netlog 'no Wi-Fi interface found; watchdog exiting'; return 0; }
-  netlog "watchdog started on $dev ($(network_recovery_detail))"
+  [ -n "$dev" ] || { publish_net unknown; return 0; }
+  st=$(link_state "$dev")
+  # A setting change during the probe must suppress publication and notification.
+  if [ "${1:-}" = configured ] && [ "$(config_recovery)" != 1 ]; then return 0; fi
+  publish_net "$st"
+  notify_network_transition "${NETWORK_LAST_STATE:-}" "$st"
+  [ -z "${NETWORK_LAST_STATE:-}" ] || [ "$NETWORK_LAST_STATE" = "$st" ] || netlog "state: $NETWORK_LAST_STATE -> $st"
+  NETWORK_LAST_STATE=$st; now=$(date +%s)
+  network_recovery_enabled || return 0
+  route_if=$(network_route_interface)
+  case "$st" in
+    online) NETWORK_NOIP_REPORTED=0; NETWORK_RADIO_OFF_UNTIL=0 ;;
+    radio_off)
+      if [ "${NETWORK_RADIO_OFF_UNTIL:-0}" -le "$now" ]; then
+        NETWORK_RADIO_OFF_UNTIL=$((now + RADIO_OFF_COOLDOWN))
+        netlog "Wi-Fi is off; respecting manual state for ${RADIO_OFF_COOLDOWN}s"
+      fi ;;
+    noip)
+      if { [ -z "$route_if" ] || [ "$route_if" = "$dev" ]; } && [ "${NETWORK_NOIP_REPORTED:-0}" -eq 0 ]; then
+        NETWORK_NOIP_REPORTED=1; dhcp_renew "$dev" || true
+      else netlog "no IP on non-Wi-Fi path (${route_if:-none}); staying passive"; fi ;;
+    unassoc) netlog "Wi-Fi is not associated on ${route_if:-no default route}; open Wi-Fi settings to reconnect" ;;
+    portal|deadlink) netlog "$st on ${route_if:-no default route}; passive observation only" ;;
+    *) netlog "network state $st; passive observation only" ;;
+  esac
+}
+
+# Diagnostic compatibility entry point; normal sessions use observation_loop.
+netwatch_loop() {
+  local ticks=0
+  network_observe_reset
   while :; do
-    st=$(link_state "$dev"); publish_net "$st"; notify_network_transition "$last_st" "$st"
-    [ -z "$last_st" ] || [ "$last_st" = "$st" ] || netlog "state: $last_st -> $st"
-    last_st=$st; ticks=$((ticks + 1)); now=$(date +%s)
-    if ! network_recovery_enabled; then
-      netlog 'network monitoring disabled; observing this final tick only'
-    else
-      route_if=$(network_route_interface)
-      case "$st" in
-        online) noip_reported=0; radio_off_until=0 ;;
-        radio_off)
-          # There is no reliable way to identify intent. Treat radio-off as
-          # manual and never turn the radio on from this monitor.
-          if [ "$radio_off_until" -le "$now" ]; then radio_off_until=$((now + RADIO_OFF_COOLDOWN)); netlog "Wi-Fi is off; respecting manual state for ${RADIO_OFF_COOLDOWN}s"; fi ;;
-        noip)
-          if { [ -z "$route_if" ] || [ "$route_if" = "$dev" ]; } && [ "$noip_reported" -eq 0 ]; then
-            noip_reported=1; dhcp_renew "$dev" || true
-          else
-            netlog "no IP on non-Wi-Fi path (${route_if:-none}); staying passive"
-          fi ;;
-        unassoc) netlog "Wi-Fi is not associated on ${route_if:-no default route}; open Wi-Fi settings to reconnect" ;;
-        portal|deadlink) netlog "$st on ${route_if:-no default route}; passive observation only" ;;
-        *) netlog "network state $st; passive observation only" ;;
-      esac
-    fi
+    network_observe_once
+    ticks=$((ticks + 1))
     [ "$NETWATCH_MAX_TICKS" -gt 0 ] 2>/dev/null && [ "$ticks" -ge "$NETWATCH_MAX_TICKS" ] && return 0
     network_sleep "$CHECK_EVERY"
   done
@@ -182,17 +193,17 @@ netwatch_loop() {
 network_session_id() { printf '%s' "${session_id:-${SESSION_ID:-}}"; }
 start_network_monitor() {
   [ "${VIBECAF_NO_NETWATCH:-0}" = 1 ] && return 0
-  netwatch_pid >/dev/null 2>&1 && return 0
-  mkdir -p "$(dirname "$NETLOG")" || return 1
-  nohup "$SELF" __netwatch 9>&- >/dev/null 2>&1 &
-  if command -v process_record_write >/dev/null 2>&1; then process_record_write "$NETPIDFILE" "$!" netwatch "$(network_session_id)"
-  else printf '%s\n' "$!" > "$NETPIDFILE"; fi
+  # Retire a verified legacy worker before starting the shared observer.
+  process_record_signal "$NETPIDFILE" netwatch "$(network_session_id)" TERM || return 1
+  rm -f "$NETSTATEFILE"
+  start_observation
 }
 
 stop_network_monitor() {
   if command -v process_record_signal >/dev/null 2>&1; then process_record_signal "$NETPIDFILE" netwatch "$(network_session_id)" TERM || true
   else local pid; if pid=$(netwatch_pid); then kill "$pid" 2>/dev/null || true; fi; fi
   rm -f "$NETPIDFILE" "$NETSTATEFILE"; netlog 'watchdog stopped'
+  [ "${VIBECAF_NO_OBSERVATION:-0}" != 1 ] || stop_observation "$(network_session_id)"
 }
 
 # Compatibility while core migrates callers.

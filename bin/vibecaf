@@ -13,6 +13,9 @@ elif [ -x "$SELF_DIR/../Helpers/vibecaf-thermal" ]; then THERMAL_STATE_CMD="$SEL
 elif [ -x "$SELF_DIR/../.build/helpers/vibecaf-thermal" ]; then THERMAL_STATE_CMD="$SELF_DIR/../.build/helpers/vibecaf-thermal"
 else THERMAL_STATE_CMD="$SELF_DIR/vibecaf-thermal"; fi
 AGENT_SCAN_CMD=${VIBECAF_AGENT_SCAN_CMD:-"$SELF_DIR/vibecaf-agent-scan"}
+if [ -n "${VIBECAF_OBSERVATION_RUNNER:-}" ]; then OBSERVATION_RUNNER=$VIBECAF_OBSERVATION_RUNNER
+elif [ -x "$SELF_DIR/../Helpers/vibecaf-agent-scan-core" ]; then OBSERVATION_RUNNER="$SELF_DIR/../Helpers/vibecaf-agent-scan-core"
+else OBSERVATION_RUNNER="$SELF_DIR/../.build/helpers/vibecaf-agent-scan-core"; fi
 
 USER_ID=$(id -u)
 RUNTIME_DIR=${VIBECAF_RUNTIME_DIR:-"/tmp/vibecaf.$USER_ID"}
@@ -133,7 +136,10 @@ start_caffeinate() { local id; id=$(current_session_id); our_caffeinate_pid "$id
 stop_caffeinate() { process_record_signal "$PIDFILE" caffeinate "${1:-$(current_session_id)}"; }
 observation_pid() { process_record_matches "$OBSPIDFILE" observation "${1:-$(current_session_id)}"; }
 start_observation() {
-  local id; [ "${VIBECAF_NO_OBSERVATION:-0}" = 1 ] && return 0
+  local id
+  if [ "${VIBECAF_NO_OBSERVATION:-0}" = 1 ]; then
+    [ "${VIBECAF_NO_NETWATCH:-0}" != 1 ] && [ "$(config_recovery)" = 1 ] || return 0
+  fi
   id=$(current_session_id); observation_pid "$id" >/dev/null && return 0
   start_owned_process observation "$OBSPIDFILE" "$SELF" __observation
 }
@@ -508,5 +514,6 @@ case "$command" in on) shift; duration=$(config_duration); if [ "$#" -gt 0 ]; th
   netdiag) netdiag ;; goals) goals_list "${2:-}" ;; agents) agents_list "${2:-}" ;; goal) shift; goal_command "$@" ;;
   __netwatch) netwatch_loop ;; __guard) guard_loop ;; __guard_once) guard_check_once ;; __guardian) guardian_loop ;; __guardian_once) guardian_check_once ;;
   __network_transition) notify_network_transition "${2:-}" "${3:-}" ;; __dhcp_renew) dhcp_renew "${2:-$(wifi_device)}" ;;
-  __observation) observation_loop ;; __observation_once) goals_refresh; agents_ensure_cache ;;
+  __observation) observation_loop ;; __observation_once) goals_refresh; agents_cache_current 45 || agents_refresh ;;
+  __observation_scan) goals_refresh; agents_refresh ;;
   __maintenance) shift; maintenance "$@" ;; *) usage; exit 2 ;; esac

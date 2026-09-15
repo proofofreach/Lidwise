@@ -119,3 +119,28 @@ Regression tests cover both interleavings, nonblocking execution, owned-session
 skipping and observation-only command arguments. UI model/layout checks pass.
 Independent Sol ratification confirmed the requested amendments with no remaining
 problem in their scope.
+
+## Background process consolidation
+
+Network, agent and goal observation now share one optional session worker.
+The menu app, safety guard, launchd recovery guardian and `caffeinate` keep their
+separate roles. The existing bounded process runner is shared with the scanner
+helper; no additional native executable is packaged. Session scans have a
+10-second limit, including a separate process group for descendant termination.
+The off-state cache refresh threshold is 45 seconds, ahead of its 120-second
+expiry, avoiding a gap at the UI's one-minute timer boundary.
+
+An independent Sol audit identified scan blocking and setting-change races.
+Both were accepted and addressed with bounded execution, a post-probe setting
+check, and suppression of cached network results while monitoring is off.
+Implementation review found an unnecessary worker when both tasks are disabled;
+the start/stop conditions and lifecycle test now cover that case.
+
+Killing an observer can leave its already-running optional scan supervisor alive
+until its 10-second limit. This bounded tail was accepted: it cannot delay safety
+recovery, and it introduces no permanent service. Network checks can wait for a
+bounded activity scan; the polling timing is documented in `NETWORK.md`.
+Final independent verdict: **SHIP**, with no remaining blocking finding in this
+scope. The full `scripts/check.sh` passed, including universal builds and malformed
+archive rejection. The combined worker still requires installed runtime validation;
+the existing hardware release gates remain open.

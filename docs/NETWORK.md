@@ -27,3 +27,27 @@ The connectivity probe requests Apple's captive-portal endpoint over HTTP.
 That endpoint can be blocked or redirected. A failed probe alone does not prove
 that the Internet is unavailable. Cached results expire and unknown remains unknown.
 No Wi-Fi credentials are read or stored. See [Security](../SECURITY.md).
+
+## Background monitoring
+
+An awake session uses one optional worker for network, agent and goal checks.
+Network checks normally wait 20 seconds between probes; agent/goal scans run
+about once a minute and have a 10-second execution limit. A shared scan can delay
+the next network probe by up to that limit, plus process termination overhead.
+Network probes have a six-second HTTP timeout. These checks never delay the
+independent safety guard or crash guardian.
+
+Turning network monitoring off leaves agent observation running and hides cached
+network results. With awake mode off, the menu app refreshes activity on demand
+and on its timer; no persistent optional worker is needed.
+
+With the menu open as an app, expected persistent processes are:
+
+| State | Processes |
+|---|---|
+| Awake mode off | Menu app, launchd recovery guardian |
+| Awake session | Menu app, recovery guardian, safety guard, `caffeinate`, shared observer |
+
+Short-lived status commands, probes, scans and shell sleep children also appear
+in process listings. The guard, guardian and `caffeinate` remain separate because
+they provide policy checks, independent recovery and macOS sleep assertions.

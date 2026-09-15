@@ -305,14 +305,14 @@ agents_prune() {
 }
 
 agents_cache_current() {
-  local modified now age
+  local modified now age max_age=${1:-$AGENT_CACHE_MAX_AGE}
   agents_prepare_runtime || return 1
   if [ -f "$AGENTSTATEFILE" ]; then
     modified=$(stat -f %m "$AGENTSTATEFILE" 2>/dev/null || echo 0)
     now=$(date +%s)
     agent_valid_age "$modified" || modified=0
     age=$((now - modified))
-    [ "$age" -ge 0 ] && [ "$age" -le "$AGENT_CACHE_MAX_AGE" ] && return 0
+    [ "$age" -ge 0 ] && [ "$age" -le "$max_age" ] && return 0
   fi
   return 1
 }
@@ -365,17 +365,46 @@ agents_list() {
   done < "$AGENTSTATEFILE"
 }
 
-# This optional loop keeps observation work separate from safety ownership.
-# It is deliberately started by an observation caller, never by a guard.
+# Agent, goal and network observation share one worker. Safety loops never wait
+# for this optional work. Each kind of observation keeps its own polling cadence.
+observation_now() { date +%s; }
+observation_refresh_activity() {
+  [ -x "$OBSERVATION_RUNNER" ] || return 1
+  "$OBSERVATION_RUNNER" --run-bounded 10 "$SELF" __observation_scan
+}
 observation_loop() {
-  local ticks=0
+  local ticks=0 now next_activity=0 next_network=0 delay network_on=0 was_network_on=0
+  local activity_every=${OBSERVATION_EVERY:-60} network_every=${CHECK_EVERY:-20}
   while :; do
-    # Settings can change while this long-lived observer is running.
+    now=$(observation_now)
     if command -v config_notifications >/dev/null 2>&1; then AGENT_NOTIFY=$(config_notifications); fi
-    goals_refresh
-    agents_refresh || true
-    ticks=$((ticks + 1))
-    [ "$OBSERVATION_MAX_TICKS" -gt 0 ] 2>/dev/null && [ "$ticks" -ge "$OBSERVATION_MAX_TICKS" ] && return 0
-    sleep "$OBSERVATION_EVERY"
+    network_on=0
+    if [ "${VIBECAF_NO_NETWATCH:-0}" != 1 ] && command -v config_recovery >/dev/null 2>&1; then
+      NETWORK_RECOVERY=$([ "$(config_recovery)" = 1 ] && echo on || echo off)
+      network_recovery_enabled && network_on=1
+    fi
+    if [ "$network_on" != "$was_network_on" ]; then
+      network_observe_reset
+      next_network=0
+      [ "$network_on" = 1 ] || rm -f "$NETSTATEFILE"
+      was_network_on=$network_on
+    fi
+    if [ "$network_on" = 1 ] && [ "$now" -ge "$next_network" ]; then
+      network_observe_once configured || true
+      next_network=$(( $(observation_now) + network_every ))
+    fi
+    if [ "$now" -ge "$next_activity" ]; then
+      if [ "${VIBECAF_NO_OBSERVATION:-0}" != 1 ]; then observation_refresh_activity || true; fi
+      ticks=$((ticks + 1))
+      next_activity=$(( $(observation_now) + activity_every ))
+      [ "$OBSERVATION_MAX_TICKS" -gt 0 ] 2>/dev/null && [ "$ticks" -ge "$OBSERVATION_MAX_TICKS" ] && return 0
+    fi
+    now=$(observation_now)
+    delay=$((next_activity - now))
+    if [ "$network_on" = 1 ] && [ $((next_network - now)) -lt "$delay" ]; then delay=$((next_network - now)); fi
+    # Also reload settings while network monitoring is off.
+    [ "$delay" -le "$network_every" ] || delay=$network_every
+    [ "$delay" -gt 0 ] || delay=1
+    sleep "$delay"
   done
 }

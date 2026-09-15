@@ -1,7 +1,22 @@
 // Bounded, local JSONL event parsing. No transcript text is emitted.
 import Foundation
 
+@main
+struct AgentScan {
+static func main() {
 let arguments = CommandLine.arguments
+if arguments.count >= 4 && arguments[1] == "--run-bounded" {
+    guard let timeout = TimeInterval(arguments[2]), timeout > 0, timeout <= 20,
+          arguments[3].hasPrefix("/") else {
+        exit(2)
+    }
+    let result = ProcessRunner().run(executable: arguments[3], arguments: Array(arguments.dropFirst(4)), timeout: timeout)
+    FileHandle.standardOutput.write(result.stdout)
+    FileHandle.standardError.write(result.stderr)
+    if result.succeeded { exit(0) }
+    let exitCode = result.exitCode ?? 1
+    exit(exitCode == 0 ? 1 : exitCode)
+}
 if arguments.count != 3 { exit(2) }
 let url = URL(fileURLWithPath: arguments[2])
 do {
@@ -53,4 +68,6 @@ do {
 } catch {
     // Unreadable or replaced logs are unavailable, never completed.
     exit(1)
+}
+}
 }

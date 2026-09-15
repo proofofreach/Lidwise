@@ -116,6 +116,12 @@ chmod 0755 "$TEST_ROOT/forbidden-pmset"
 rm -f "$VIBECAF_RUNTIME_DIR/agent-state/sessions.tsv"
 VIBECAF_PMSET="$TEST_ROOT/forbidden-pmset" "$VIBECAF" __observation_once
 [ -s "$VIBECAF_RUNTIME_DIR/agent-state/sessions.tsv" ]
+# Refresh before the 120-second status cache expires, avoiding a timer-boundary
+# gap where active tasks briefly disappear between UI polls.
+touch -t "$(date -v-60S '+%Y%m%d%H%M.%S')" "$VIBECAF_RUNTIME_DIR/agent-state/sessions.tsv"
+old_modified=$(stat -f %m "$VIBECAF_RUNTIME_DIR/agent-state/sessions.tsv")
+VIBECAF_PMSET="$TEST_ROOT/forbidden-pmset" "$VIBECAF" __observation_once
+[ "$(stat -f %m "$VIBECAF_RUNTIME_DIR/agent-state/sessions.tsv")" -gt "$old_modified" ]
 [ ! -e "$VIBECAF_STATE_DIR/pmset-called" ]
 [ ! -e "$VIBECAF_STATE_DIR/session/active" ]
 

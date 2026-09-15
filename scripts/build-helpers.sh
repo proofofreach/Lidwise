@@ -7,10 +7,14 @@ mkdir -p "$ROOT/.build" "$OUT"
 WORK=$(mktemp -d "$ROOT/.build/helpers.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 build_helper() {
-  local source=$1 name=$2 arch
+  local name=$1 arch
+  shift
+  local sources=()
+  local source
+  for source in "$@"; do sources+=("$ROOT/src/$source"); done
   local objects=()
   for arch in $ARCHS; do
-    xcrun swiftc -O -target "$arch-apple-macosx13.0" "$ROOT/src/$source" -o "$WORK/$name-$arch"
+    xcrun swiftc -O -target "$arch-apple-macosx13.0" "${sources[@]}" -o "$WORK/$name-$arch"
     objects+=("$WORK/$name-$arch")
   done
   if [ "${#objects[@]}" -eq 1 ]; then
@@ -26,5 +30,5 @@ build_helper() {
   fi
   mv "$WORK/$name" "$OUT/$name"
 }
-build_helper ThermalState.swift vibecaf-thermal
-if [ -f "$ROOT/src/AgentScan.swift" ]; then build_helper AgentScan.swift vibecaf-agent-scan-core; fi
+build_helper vibecaf-thermal ThermalState.swift
+if [ -f "$ROOT/src/AgentScan.swift" ]; then build_helper vibecaf-agent-scan-core ProcessRunner.swift AgentScan.swift; fi

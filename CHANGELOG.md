@@ -2,6 +2,8 @@
 
 ## 1.2.0 — unreleased community candidate
 
+- Consolidate network, agent and goal monitoring into one optional session worker;
+  bound activity scans and preserve independent sleep recovery.
 - Refresh agent activity while awake mode is off, without delaying power controls.
 - Show plain temperature labels: Normal, Warm, High, and Critical.
 - Recognize resumed Codex Desktop response-item activity so a previous completed

@@ -16,6 +16,7 @@ export VIBECAF_IPCONFIG="$BIN/ipconfig"
 export VIBECAF_ROUTE="$BIN/route"
 export VIBECAF_CURL="$BIN/curl"
 export VIBECAF_NETWATCH_MAX_TICKS=1
+export VIBECAF_OBSERVATION_MAX_TICKS=1
 export VIBECAF_NETWATCH_NO_SLEEP=1
 export PATH="$BIN:$PATH"
 
@@ -44,6 +45,7 @@ EOF
 cat > "$BIN/curl" <<'EOF'
 #!/bin/bash
 out= prev=
+if [ "${STUB_DISABLE_MONITOR:-0}" = 1 ]; then printf '0\n' > "$VIBECAF_STATE_DIR/config/recovery"; fi
 for arg in "$@"; do [ "$prev" = -o ] && out=$arg; prev=$arg; done
 [ -z "$out" ] || printf '%s' "${STUB_BODY:-}" > "$out"
 printf '%s' "${STUB_CODE:-000}"
@@ -65,6 +67,7 @@ export VIBECAF_PMSET="$BIN/pmset"
 run_loop() {
   : > "$STUB_CALLS"
   "$ROOT/bin/vibecaf" __netwatch >/dev/null
+  "$ROOT/bin/vibecaf" __observation >/dev/null
 }
 assert_no_write() {
   [ ! -s "$STUB_CALLS" ] || { echo "unexpected network write for $1:" >&2; cat "$STUB_CALLS" >&2; exit 1; }
@@ -123,4 +126,14 @@ rm "$VIBECAF_RUNTIME_DIR/network.state"
 ln -s "$TEST_ROOT/sentinel" "$VIBECAF_RUNTIME_DIR/network.state"
 STUB_RADIO=On STUB_ASSOC=no STUB_IP= STUB_RIF= STUB_GW= run_loop || true
 [ "$(cat "$TEST_ROOT/sentinel")" = preserve ]
+rm -f "$VIBECAF_RUNTIME_DIR/network.state"
+mkdir -p "$VIBECAF_STATE_DIR/config"
+chmod 700 "$VIBECAF_STATE_DIR/config"
+printf '1\n' > "$VIBECAF_STATE_DIR/config/recovery"
+STUB_DISABLE_MONITOR=1 STUB_RADIO=On STUB_ASSOC=yes STUB_IP=10.0.0.4 STUB_RIF=en0 STUB_GW=10.0.0.1 STUB_CODE=200 STUB_BODY='Success' \
+  "$ROOT/bin/vibecaf" __observation >/dev/null
+[ ! -e "$VIBECAF_RUNTIME_DIR/network.state" ]
+# Even a cache published just as the preference changed is hidden while off.
+printf '%s\tonline\n' "$(date +%s)" > "$VIBECAF_RUNTIME_DIR/network.state"
+grep -q '^Network: unknown$' <("$ROOT/bin/vibecaf" status)
 echo 'network recovery loop: ok'

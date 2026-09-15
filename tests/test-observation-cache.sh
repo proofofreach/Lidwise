@@ -27,6 +27,33 @@ OBSERVATION_MAX_TICKS=1
 config_notifications() { echo 1; }
 goals_refresh() { :; }
 agents_refresh() { [ "$AGENT_NOTIFY" = 1 ] || return 1; touch "$WORK/live-setting"; }
+observation_refresh_activity() { goals_refresh; agents_refresh; }
 observation_loop
 [ -f "$WORK/live-setting" ]
 echo 'observer reloads live notification preference: ok'
+
+# Exercise scheduling and live network toggles without real time or processes.
+(
+  clock=0; OBSERVATION_EVERY=60; CHECK_EVERY=20; OBSERVATION_MAX_TICKS=3
+  NETSTATEFILE="$WORK/network.state"
+  observation_now() { echo "$clock"; }
+  sleep() { clock=$((clock + $1)); }
+  config_recovery() { if [ "$clock" -ge 20 ] && [ "$clock" -lt 60 ]; then echo 0; else echo 1; fi; }
+  network_recovery_enabled() { [ "$NETWORK_RECOVERY" = on ]; }
+  network_observe_reset() { :; }
+  network_observe_once() { echo "$clock" >> "$WORK/network-ticks"; touch "$NETSTATEFILE"; }
+  observation_refresh_activity() { echo "$clock" >> "$WORK/activity-ticks"; }
+  observation_loop
+  [ "$(tr '\n' ' ' < "$WORK/network-ticks")" = '0 60 80 100 120 ' ]
+  [ "$(tr '\n' ' ' < "$WORK/activity-ticks")" = '0 60 120 ' ]
+  # Either task can be suppressed independently.
+  clock=0; OBSERVATION_MAX_TICKS=1; VIBECAF_NO_OBSERVATION=1
+  : > "$WORK/activity-ticks"; : > "$WORK/network-ticks"
+  observation_loop
+  [ ! -s "$WORK/activity-ticks" ] && [ -s "$WORK/network-ticks" ]
+  clock=0; VIBECAF_NO_OBSERVATION=0; VIBECAF_NO_NETWATCH=1
+  : > "$WORK/activity-ticks"; : > "$WORK/network-ticks"
+  observation_loop
+  [ -s "$WORK/activity-ticks" ] && [ ! -s "$WORK/network-ticks" ]
+)
+echo 'one observer preserves task cadence, live network toggles and independent task flags: ok'
