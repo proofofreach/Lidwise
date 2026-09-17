@@ -190,7 +190,9 @@ guard_check_once_locked() {
   floor=$(read_uint "$SESSION_DIR" battery_floor "$BATTERY_FLOOR")
   require_ac=$(read_uint "$SESSION_DIR" require_ac 0)
   if [ "$require_ac" = 1 ] && [ "$src" != AC ]; then guard_auto_off "AC power is required for this session"; return; fi
-  if [ "$src" = Battery ] && valid_battery_percent "$pct" && [ "$pct" -le "$floor" ]; then guard_auto_off "battery floor: ${pct}% on battery"; fi
+  # AC describes the connection, not whether it can sustain the workload.
+  # Enforce the floor even while plugged in or reportedly charging.
+  if valid_battery_percent "$pct" && [ "$pct" -le "$floor" ]; then guard_auto_off "battery floor: ${pct}% (power source: $src)"; fi
 }
 guard_check_once() {
   local rc id
@@ -280,7 +282,7 @@ preflight_on() {
   [ "$src" != unknown ] && valid_battery_percent "$pct" || { echo "Cannot verify battery and power state." >&2; return 1; }
   pct=$(uint_normalize "$pct")
   [ "$REQUIRE_AC" != 1 ] || [ "$src" = AC ] || { echo "AC power is required by the next-session policy." >&2; return 1; }
-  [ "$src" != Battery ] || [ "$pct" -gt "$BATTERY_FLOOR" ] || { echo "Battery is at ${pct}%, at or below the ${BATTERY_FLOOR}% safety floor." >&2; return 1; }
+  [ "$pct" -gt "$BATTERY_FLOOR" ] || { echo "Battery is at ${pct}%, at or below the ${BATTERY_FLOOR}% safety floor." >&2; return 1; }
   thermal=$(thermal_state)
   case "$thermal" in nominal|fair) ;; serious|critical) echo "Thermal pressure is $thermal; awake mode was not enabled." >&2; return 1 ;;
     *) echo "Thermal monitoring is unavailable; awake mode was not enabled." >&2; return 1 ;; esac

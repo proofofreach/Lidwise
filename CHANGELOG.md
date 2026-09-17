@@ -2,6 +2,9 @@
 
 ## 1.2.0 — unreleased community candidate
 
+- Enforce the battery floor on AC as well as battery power, including activation.
+  A connected charger no longer bypasses low-battery protection.
+
 - Renamed the app, CLI, source files, documentation, and release packages to Lidwise.
   Upgrade installation migrates the old app and login path with rollback support.
   Existing settings and recovery identifiers remain compatible.

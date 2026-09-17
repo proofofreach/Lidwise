@@ -22,7 +22,7 @@ cat > "$VIBECAF_PMSET" <<'MOCK'
 #!/bin/bash
 set -e
 case "$1 ${2:-}" in
-  "-g batt") echo "Now drawing from '${MOCK_POWER_SOURCE:-AC Power}'"; echo " -InternalBattery-0 (id=1) ${MOCK_BATTERY_PCT:-100}%; charged" ;;
+  "-g batt") echo "Now drawing from '${MOCK_POWER_SOURCE:-AC Power}'"; echo " -InternalBattery-0 (id=1) ${MOCK_BATTERY_PCT:-100}%; ${MOCK_CHARGE_STATUS:-charged}" ;;
   "-g ") [ "${MOCK_PMSET_QUERY_FAIL:-0}" = "1" ] && exit 1; echo " SleepDisabled $(cat "$MOCK_PMSET_STATE")"; echo " standby 1" ;;
   "-a disablesleep") printf '%s\n' "$3" > "$MOCK_PMSET_STATE" ;;
   *) exit 2 ;;
@@ -67,6 +67,25 @@ begin_fake_session() {
   printf '%s\n' "$now" > "$VIBECAF_STATE_DIR/session/heartbeat"
 }
 
+# A connected charger cannot bypass the floor, even if macOS says charging.
+for charge in charging 'not charging' discharging; do
+  for pct in 10 20; do
+    printf '0\n' > "$MOCK_PMSET_STATE"
+    if MOCK_POWER_SOURCE="AC Power" MOCK_BATTERY_PCT="$pct" MOCK_CHARGE_STATUS="$charge" \
+      "$VIBECAF" on > "$TEST_ROOT/low-ac-output" 2>&1; then
+      echo 'accepted low-battery AC activation'; exit 1
+    fi
+    grep -q 'at or below the 20% safety floor' "$TEST_ROOT/low-ac-output"
+    [ "$(cat "$MOCK_PMSET_STATE")" = 0 ]
+    begin_fake_session
+    MOCK_POWER_SOURCE="AC Power" MOCK_BATTERY_PCT="$pct" MOCK_CHARGE_STATUS="$charge" "$VIBECAF" __guard_once
+    [ "$(cat "$MOCK_PMSET_STATE")" = 0 ] || { echo 'AC bypassed the battery floor'; exit 1; }
+  done
+done
+begin_fake_session
+MOCK_POWER_SOURCE="AC Power" MOCK_BATTERY_PCT=21 "$VIBECAF" __guard_once
+[ "$(cat "$MOCK_PMSET_STATE")" = 1 ]
+
 begin_fake_session
 printf 'critical\n' > "$MOCK_THERMAL_STATE"
 "$VIBECAF" __guard_once
@@ -86,14 +105,14 @@ begin_fake_session
 printf 'nominal\n' > "$MOCK_THERMAL_STATE"
 MOCK_POWER_SOURCE="Battery Power" MOCK_BATTERY_PCT=10 VIBECAF_BATTERY_FLOOR=20 "$VIBECAF" __guard_once
 [ "$(cat "$MOCK_PMSET_STATE")" = "0" ]
-grep -q $'Awake mode turned off\tbattery floor: 10% on battery' "$VIBECAF_NOTIFY_LOG"
+grep -q $'Awake mode turned off\tbattery floor: 10% (power source: Battery)' "$VIBECAF_NOTIFY_LOG"
 
 begin_fake_session
 printf 'nominal\n' > "$MOCK_THERMAL_STATE"
 MOCK_SUDO_FAIL=1 MOCK_POWER_SOURCE="Battery Power" MOCK_BATTERY_PCT=10 \
   VIBECAF_NONINTERACTIVE=1 VIBECAF_BATTERY_FLOOR=20 "$VIBECAF" __guard_once || true
 [ "$(cat "$MOCK_PMSET_STATE")" = "1" ]
-grep -q $'Safety recovery failed\tbattery floor: 10% on battery; normal sleep is still blocked' "$VIBECAF_NOTIFY_LOG"
+grep -q $'Safety recovery failed\tbattery floor: 10% (power source: Battery); normal sleep is still blocked' "$VIBECAF_NOTIFY_LOG"
 
 begin_fake_session
 printf 'nominal\n' > "$MOCK_THERMAL_STATE"

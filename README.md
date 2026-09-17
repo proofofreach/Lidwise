@@ -49,6 +49,8 @@ measures one run without changing your power settings.
 Network, agent, and job monitoring share one optional background worker during
 awake sessions. Sleep protection and independent recovery remain separate.
 Temperature status uses **Normal**, **Warm**, **High**, and **Critical**.
+The battery floor applies even with a charger connected. At or below that floor,
+Lidwise ends an active session and refuses a new one until the battery recovers.
 
 **Quit menu bar app** leaves the session and recovery running. **Turn off and
 quit** first verifies sleep restoration. A per-user system launchd job is intended
