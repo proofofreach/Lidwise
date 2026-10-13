@@ -21,10 +21,9 @@
 
 ---
 
-> **Renamed to Lidwise.** Existing downloads still install `Closed-Lid Awake.app`
-> and the `vibecaf` command. The instructions below retain those names so they
-> work with the published build. The renamed 1.2.0 candidate is still undergoing
-> local testing and has not been released.
+> **Renamed from Closed-Lid Awake.** Version 1.0.0 installed `Closed-Lid Awake.app`
+> and the `vibecaf` command. `scripts/install.sh` removes those names, including
+> the old login item and sudoers rule, before it installs Lidwise.
 
 ## TL;DR
 
@@ -89,7 +88,7 @@ source, network state, guard state, and remaining time.
 You can also press `⌃⌥A` anywhere or run:
 
 ```bash
-vibecaf toggle
+lidwise toggle
 ```
 
 ## Requirements
@@ -125,8 +124,8 @@ No Xcode or developer tools required.
 The installer places:
 
 ```text
-~/Applications/Closed-Lid Awake.app
-~/.local/bin/vibecaf
+~/Applications/Lidwise.app
+~/.local/bin/lidwise
 ```
 
 It also asks for administrator approval to install a narrow `sudoers` rule.
@@ -168,13 +167,13 @@ The build creates a universal Intel and Apple Silicon app in `dist/`.
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
-│                    Closed-Lid Awake.app                      │
+│                    Lidwise.app                      │
 │  menu bar · global hotkey · state · login item · notch fix  │
 └──────────────────────────────┬───────────────────────────────┘
                                │
                                ▼
 ┌──────────────────────────────────────────────────────────────┐
-│                         vibecaf                              │
+│                         lidwise                              │
 │        owns the session, PID files, logs, and cleanup        │
 └───────────────┬──────────────────┬──────────────────┬────────┘
                 │                  │                  │
@@ -209,12 +208,12 @@ The helper tracks only processes it starts. It does not kill unrelated
 The menu-bar app and CLI control the same state.
 
 ```bash
-vibecaf on            # Start an awake session
-vibecaf off           # Stop it and restore normal sleep
-vibecaf toggle        # Switch state
-vibecaf status        # Fast local status
-vibecaf status --net  # Status with a live network probe
-vibecaf netlog        # Show recent watchdog activity
+lidwise on            # Start an awake session
+lidwise off           # Stop it and restore normal sleep
+lidwise toggle        # Switch state
+lidwise status        # Fast local status
+lidwise status --net  # Status with a live network probe
+lidwise netlog        # Show recent watchdog activity
 ```
 
 Example status:
@@ -246,9 +245,9 @@ Lidwise reduces risk; it cannot eliminate it.
 For guard testing, you can override the defaults for one shell session:
 
 ```bash
-VIBECAF_DEADMAN_SECONDS=20 VIBECAF_GUARD_EVERY=5 vibecaf on
+LIDWISE_DEADMAN_SECONDS=20 LIDWISE_GUARD_EVERY=5 lidwise on
 sleep 40
-vibecaf status
+lidwise status
 ```
 
 Do not use test overrides for real unattended work.
@@ -267,7 +266,7 @@ It uses networks already known to macOS. It never reads or stores Wi-Fi
 credentials. Disable the watchdog for one session with:
 
 ```bash
-VIBECAF_NO_NETWATCH=1 vibecaf on
+LIDWISE_NO_NETWATCH=1 lidwise on
 ```
 
 ## Settings
@@ -286,8 +285,8 @@ The default is `⌃⌥A`. Configure another key through macOS defaults, then
 restart the app:
 
 ```bash
-defaults write app.closedlidawake.ClosedLidAwake HotkeyKeyCode -int 0
-defaults write app.closedlidawake.ClosedLidAwake HotkeyModifiers -int 3
+defaults write com.proofofreach.Lidwise HotkeyKeyCode -int 0
+defaults write com.proofofreach.Lidwise HotkeyModifiers -int 3
 ```
 
 Modifier values are additive:
@@ -306,7 +305,7 @@ Modifier values are additive:
 Run:
 
 ```bash
-vibecaf status
+lidwise status
 pmset -g | grep SleepDisabled
 ```
 
@@ -320,21 +319,21 @@ It may be behind the MacBook notch or hidden by another menu-bar manager.
 - Press `⌃⌥A` to toggle awake mode.
 - Quit or move a few menu-bar items.
 - Reopen the app and choose **Move icon out of the notch**.
-- Run `vibecaf status` if you need an authoritative state check.
+- Run `lidwise status` if you need an authoritative state check.
 
 ### Wi-Fi keeps disconnecting
 
 Inspect the watchdog log:
 
 ```bash
-vibecaf netlog
+lidwise netlog
 ```
 
 If a VPN, captive portal, or unusual network conflicts with probing, disable
 the watchdog for that session:
 
 ```bash
-VIBECAF_NO_NETWATCH=1 vibecaf on
+LIDWISE_NO_NETWATCH=1 lidwise on
 ```
 
 ### Normal sleep did not return
@@ -342,7 +341,7 @@ VIBECAF_NO_NETWATCH=1 vibecaf on
 Turn the app off again, then verify the system state:
 
 ```bash
-vibecaf off
+lidwise off
 pmset -g | grep SleepDisabled
 ```
 

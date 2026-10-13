@@ -1,4 +1,4 @@
-// Renders the Closed-Lid Awake app icon with Core Graphics.
+// Renders the Lidwise app icon with Core Graphics.
 // Apple-style superellipse body, warm amber glow, coffee cup on a closed laptop.
 import Foundation
 import CoreGraphics

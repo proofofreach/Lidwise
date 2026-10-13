@@ -1,18 +1,18 @@
-// Closed-Lid Awake — menu bar control for ~/.local/bin/vibecaf
+// Lidwise — menu bar control for ~/.local/bin/lidwise
 import AppKit
 import Carbon.HIToolbox
 
-let bundledVibecafPath = Bundle.main.url(forResource: "vibecaf", withExtension: nil)?.path
-let vibecafPath = bundledVibecafPath
-    ?? NSString(string: "~/.local/bin/vibecaf").expandingTildeInPath
-let agentLabel = Bundle.main.bundleIdentifier ?? "app.closedlidawake.ClosedLidAwake"
+let bundledLidwisePath = Bundle.main.url(forResource: "lidwise", withExtension: nil)?.path
+let lidwisePath = bundledLidwisePath
+    ?? NSString(string: "~/.local/bin/lidwise").expandingTildeInPath
+let agentLabel = Bundle.main.bundleIdentifier ?? "com.proofofreach.Lidwise"
 let agentPlist = NSString(string: "~/Library/LaunchAgents/\(agentLabel).plist").expandingTildeInPath
 let kAutoEnable = "autoEnableAtLogin"
 
 @discardableResult
-func vibecaf(_ args: String...) -> String {
+func lidwise(_ args: String...) -> String {
     let p = Process()
-    p.executableURL = URL(fileURLWithPath: vibecafPath)
+    p.executableURL = URL(fileURLWithPath: lidwisePath)
     p.arguments = args
     let out = Pipe()
     p.standardOutput = out
@@ -40,7 +40,7 @@ struct State {
 // 8.5s on a dead network, so only ask for one when the user is looking.
 func readState(probeNet: Bool = false) -> State {
     var s = State()
-    let out = probeNet ? vibecaf("status", "--net") : vibecaf("status")
+    let out = probeNet ? lidwise("status", "--net") : lidwise("status")
     for line in out.split(separator: "\n") {
         if line.hasPrefix("AWAKE MODE:") { s.on = line.contains("ON") }
         if line.hasPrefix("Power:") {
@@ -59,13 +59,13 @@ func readState(probeNet: Bool = false) -> State {
     return s
 }
 
-let placementLogPath = NSString(string: "~/Library/Logs/closedlidawake.log").expandingTildeInPath
+let placementLogPath = NSString(string: "~/Library/Logs/lidwise.log").expandingTildeInPath
 
 func plog(_ msg: String) {
     let f = DateFormatter()
     f.dateFormat = "yyyy-MM-dd HH:mm:ss"
     let line = "\(f.string(from: Date()))  \(msg)\n"
-    NSLog("Closed-Lid Awake: \(msg)")
+    NSLog("Lidwise: \(msg)")
     guard let data = line.data(using: .utf8) else { return }
     if let h = FileHandle(forWritingAtPath: placementLogPath) {
         h.seekToEndOfFile(); h.write(data); try? h.close()
@@ -107,7 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var iconHidden = false
     var warnedAboutHiding = false
 
-    static let autosaveName = "ClosedLidAwakeStatusItem"
+    static let autosaveName = "LidwiseStatusItem"
     static let positionKey = "NSStatusItem Preferred Position \(autosaveName)"
     // AppKit deletes its own autosaved position whenever the item is removed,
     // which the recovery loop does on every attempt — so the hint that finally
@@ -145,14 +145,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // at login, not on a manual relaunch.
         if UserDefaults.standard.bool(forKey: kAutoEnable),
            ProcessInfo.processInfo.environment["CLA_LAUNCHED_AT_LOGIN"] == "1" {
-            vibecaf("on")
+            lidwise("on")
         }
 
         registerHotkey()
         refresh()
         // 60s, not 20s. menuWillOpen refreshes on demand, so the timer only has
         // to catch state changed behind the app's back — someone running
-        // `vibecaf off` in a terminal, or the guard disarming itself. A minute
+        // `lidwise off` in a terminal, or the guard disarming itself. A minute
         // is ample for that, and it is three times less work while idle.
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in self.refresh() }
 
@@ -282,7 +282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             drawn behind the notch where you cannot see or click it.
 
             Awake mode still works. Use the \(hotkeyLabel.isEmpty ? "global hotkey" : hotkeyLabel) hotkey, \
-            Raycast, or `vibecaf toggle` in a terminal.
+            Raycast, or `lidwise toggle` in a terminal.
 
             To get the icon back, quit a few other menu bar apps — or ⌘-drag this \
             one to an empty slot once it appears.
@@ -304,12 +304,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func currentImage() -> NSImage? {
         let symbol = state.on ? "cup.and.saucer.fill" : "moon.zzz.fill"
-        let img = NSImage(systemSymbolName: symbol, accessibilityDescription: "Closed-Lid Awake")
+        let img = NSImage(systemSymbolName: symbol, accessibilityDescription: "Lidwise")
         img?.isTemplate = true
         return img
     }
 
-    // Fetch off the main thread, always. `vibecaf status` forks pmset, and with
+    // Fetch off the main thread, always. `lidwise status` forks pmset, and with
     // --net it can block for 8.5s on a dead network. This used to run
     // synchronously on a 20s timer, which stalled the menu bar for 8.5 of every
     // 20 seconds exactly when the network was bad — the one situation the app
@@ -355,11 +355,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func toggle() {
         let turningOn = !state.on
-        // Run off the main thread: `vibecaf on` spawns caffeinate and the
+        // Run off the main thread: `lidwise on` spawns caffeinate and the
         // watchdog, and a beachballing menu bar item you can't even see is a
         // particularly unhelpful failure mode.
         DispatchQueue.global(qos: .userInitiated).async {
-            vibecaf(turningOn ? "on" : "off")
+            lidwise(turningOn ? "on" : "off")
             DispatchQueue.main.async {
                 self.refresh()
                 self.showHUD(turningOn)
@@ -428,8 +428,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Default ⌃⌥A. Carbon's RegisterEventHotKey is used rather than an NSEvent
     // global monitor because the latter needs Accessibility permission and this
     // does not. Overridable without a rebuild:
-    //   defaults write app.closedlidawake.ClosedLidAwake HotkeyKeyCode  -int 0   # 0 = A
-    //   defaults write app.closedlidawake.ClosedLidAwake HotkeyModifiers -int 3  # 1=⌘ 2=⇧ 4=⌥ 8=⌃, summed
+    //   defaults write com.proofofreach.Lidwise HotkeyKeyCode  -int 0   # 0 = A
+    //   defaults write com.proofofreach.Lidwise HotkeyModifiers -int 3  # 1=⌘ 2=⇧ 4=⌥ 8=⌃, summed
     func registerHotkey() {
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                  eventKind: UInt32(kEventHotKeyPressed))
@@ -464,16 +464,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                              GetApplicationEventTarget(), 0, &hotKeyRef)
             if status == noErr {
                 hotkeyLabel = label + keyName
-                NSLog("Closed-Lid Awake: hotkey \(hotkeyLabel) registered")
+                NSLog("Lidwise: hotkey \(hotkeyLabel) registered")
                 return
             }
-            NSLog("Closed-Lid Awake: \(label)\(keyName) unavailable (\(status)) — trying next")
+            NSLog("Lidwise: \(label)\(keyName) unavailable (\(status)) — trying next")
         }
         hotkeyLabel = "unavailable — all combos taken"
     }
 
     @objc func openNetLog() {
-        let log = NSString(string: "~/Library/Logs/vibecaf-net.log").expandingTildeInPath
+        let log = NSString(string: "~/Library/Logs/lidwise-net.log").expandingTildeInPath
         if !FileManager.default.fileExists(atPath: log) {
             FileManager.default.createFile(atPath: log, contents: Data())
         }

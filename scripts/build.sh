@@ -5,7 +5,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 VERSION=${VERSION:-$(tr -d '[:space:]' < "$ROOT/VERSION")}
 BUILD_DIR="$ROOT/.build"
 DIST_DIR="$ROOT/dist"
-APP="$DIST_DIR/Closed-Lid Awake.app"
+APP="$DIST_DIR/Lidwise.app"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
@@ -17,24 +17,24 @@ mkdir -p "$BUILD_DIR" "$MACOS" "$RESOURCES" "$ICONSET"
 
 objects=()
 for arch in $ARCHS; do
-  output="$BUILD_DIR/ClosedLidAwake-$arch"
+  output="$BUILD_DIR/Lidwise-$arch"
   xcrun swiftc \
     -O \
     -target "$arch-apple-macosx13.0" \
     -framework AppKit \
     -framework Carbon \
-    "$ROOT/src/ClosedLidAwake.swift" \
+    "$ROOT/src/Lidwise.swift" \
     -o "$output"
   objects+=("$output")
 done
 
 if [ "${#objects[@]}" -eq 1 ]; then
-  cp "${objects[0]}" "$MACOS/ClosedLidAwake"
+  cp "${objects[0]}" "$MACOS/Lidwise"
 else
-  xcrun lipo -create "${objects[@]}" -output "$MACOS/ClosedLidAwake"
+  xcrun lipo -create "${objects[@]}" -output "$MACOS/Lidwise"
 fi
 
-install -m 0755 "$ROOT/bin/vibecaf" "$RESOURCES/vibecaf"
+install -m 0755 "$ROOT/bin/lidwise" "$RESOURCES/lidwise"
 
 xcrun swiftc "$ROOT/src/makeicon.swift" -o "$BUILD_DIR/makeicon"
 "$BUILD_DIR/makeicon" "$BUILD_DIR/appicon.png"
@@ -58,11 +58,11 @@ make_icon 1024 icon_512x512@2x.png
 
 PLIST="$CONTENTS/Info.plist"
 /usr/bin/plutil -create xml1 "$PLIST"
-/usr/bin/plutil -insert CFBundleDisplayName -string "Closed-Lid Awake" "$PLIST"
-/usr/bin/plutil -insert CFBundleExecutable -string "ClosedLidAwake" "$PLIST"
+/usr/bin/plutil -insert CFBundleDisplayName -string "Lidwise" "$PLIST"
+/usr/bin/plutil -insert CFBundleExecutable -string "Lidwise" "$PLIST"
 /usr/bin/plutil -insert CFBundleIconFile -string "appicon" "$PLIST"
-/usr/bin/plutil -insert CFBundleIdentifier -string "app.closedlidawake.ClosedLidAwake" "$PLIST"
-/usr/bin/plutil -insert CFBundleName -string "Closed-Lid Awake" "$PLIST"
+/usr/bin/plutil -insert CFBundleIdentifier -string "com.proofofreach.Lidwise" "$PLIST"
+/usr/bin/plutil -insert CFBundleName -string "Lidwise" "$PLIST"
 /usr/bin/plutil -insert CFBundlePackageType -string "APPL" "$PLIST"
 /usr/bin/plutil -insert CFBundleShortVersionString -string "$VERSION" "$PLIST"
 /usr/bin/plutil -insert CFBundleVersion -string "${BUILD_NUMBER:-1}" "$PLIST"

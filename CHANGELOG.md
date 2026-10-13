@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0
+
+- Renamed from Closed-Lid Awake to Lidwise: app, `lidwise` command, bundle ID
+  `com.proofofreach.Lidwise`, `LIDWISE_*` environment variables.
+- Installer and uninstaller remove the pre-rename app, command, login item,
+  and sudoers rule.
+
 ## 1.0.0 — staged
 
 - Added menu-bar and global-hotkey controls.

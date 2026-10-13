@@ -1,6 +1,6 @@
 # Security model
 
-Closed-Lid Awake changes system power behavior. Review this model before use.
+Lidwise changes system power behavior. Review this model before use.
 
 ## Administrator privilege
 
@@ -34,11 +34,11 @@ retries known networks. It does not read or store Wi-Fi credentials.
 
 ## Local files
 
-Runtime PID and state files use `/tmp/vibecaf-*.<uid>`. Logs are written to:
+Runtime PID and state files use `/tmp/lidwise-*.<uid>`. Logs are written to:
 
 ```text
-~/Library/Logs/vibecaf-net.log
-~/Library/Logs/closedlidawake.log
+~/Library/Logs/lidwise-net.log
+~/Library/Logs/lidwise.log
 ```
 
 No telemetry is collected.
@@ -46,5 +46,5 @@ No telemetry is collected.
 ## Reporting a vulnerability
 
 Do not publish exploit details in a public issue. Use GitHub's
-[private vulnerability report](https://github.com/ProofOfReach/ClosedLidAwake/security/advisories/new)
+[private vulnerability report](https://github.com/ProofOfReach/Lidwise/security/advisories/new)
 so the maintainers can investigate before disclosure.
