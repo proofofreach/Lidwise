@@ -29,14 +29,14 @@ notarized, or broadly hardware-tested.
 Store notarization credentials in the macOS Keychain, not in this repository:
 
 ```bash
-xcrun notarytool store-credentials closed-lid-awake-notary
+xcrun notarytool store-credentials lidwise-notary
 ```
 
 Then run:
 
 ```bash
 SIGNING_IDENTITY="Developer ID Application: Example (TEAMID)" \
-NOTARY_PROFILE="closed-lid-awake-notary" \
+NOTARY_PROFILE="lidwise-notary" \
 ./scripts/notarize.sh
 ```
 
@@ -46,7 +46,7 @@ ticket, runs Gatekeeper assessment, and packages the stapled app.
 ## Artifact inspection
 
 ```bash
-codesign -dv --verbose=4 "dist/Closed-Lid Awake.app"
-spctl --assess --type execute --verbose=2 "dist/Closed-Lid Awake.app"
+codesign -dv --verbose=4 "dist/Lidwise.app"
+spctl --assess --type execute --verbose=2 "dist/Lidwise.app"
 (cd dist && shasum -a 256 -c *.sha256)
 ```

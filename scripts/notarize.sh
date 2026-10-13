@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-APP="$ROOT/dist/Closed-Lid Awake.app"
+APP="$ROOT/dist/Lidwise.app"
 SUBMISSION="$ROOT/.build/notarization.zip"
 
 : "${SIGNING_IDENTITY:?Set SIGNING_IDENTITY to a Developer ID Application certificate name}"

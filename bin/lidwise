@@ -1,5 +1,5 @@
 #!/bin/bash
-# vibecaf — keep this Mac fully awake, and online, with the lid CLOSED.
+# lidwise — keep this Mac fully awake, and online, with the lid CLOSED.
 #
 # Why this exists: `caffeinate` alone does not survive closing the lid. Its
 # assertions block *idle* sleep only; clamshell (lid-close) sleep is a separate
@@ -7,7 +7,7 @@
 # it is `pmset disablesleep 1`. This script pairs the two, and runs a network
 # watchdog that re-joins known Wi-Fi if the link drops while you're not looking.
 #
-# Usage: vibecaf [on|off|toggle|status|netlog]
+# Usage: lidwise [on|off|toggle|status|netlog]
 
 set -u
 
@@ -17,14 +17,14 @@ NETWORKSETUP=/usr/sbin/networksetup
 OSASCRIPT=/usr/bin/osascript
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 
-PIDFILE="/tmp/vibecaf.$(id -u).pid"
-NETPIDFILE="/tmp/vibecaf-net.$(id -u).pid"
-GUARDPIDFILE="/tmp/vibecaf-guard.$(id -u).pid"
-STARTFILE="/tmp/vibecaf-started.$(id -u)"
+PIDFILE="/tmp/lidwise.$(id -u).pid"
+NETPIDFILE="/tmp/lidwise-net.$(id -u).pid"
+GUARDPIDFILE="/tmp/lidwise-guard.$(id -u).pid"
+STARTFILE="/tmp/lidwise-started.$(id -u)"
 # The watchdog's latest verdict, so `status` can report the network without
 # running its own probe. See net_state / cheap_net.
-NETSTATEFILE="/tmp/vibecaf-net-state.$(id -u)"
-NETLOG="$HOME/Library/Logs/vibecaf-net.log"
+NETSTATEFILE="/tmp/lidwise-net-state.$(id -u)"
+NETLOG="$HOME/Library/Logs/lidwise-net.log"
 
 # -i idle system sleep, -m disk idle sleep, -s system sleep while on AC.
 #
@@ -40,9 +40,9 @@ CAF_FLAGS=(-i -m -s)
 # happens. The guard turns awake mode off by itself in both cases.
 # Overridable by environment so the guard can be exercised without waiting six
 # hours for it — see the test note at the bottom of this file.
-BATTERY_FLOOR=${VIBECAF_BATTERY_FLOOR:-20}      # % — below this, on battery, awake mode turns itself off
-DEADMAN_SECONDS=${VIBECAF_DEADMAN_SECONDS:-21600} # 6h — hard ceiling on one session, whatever the power
-GUARD_EVERY=${VIBECAF_GUARD_EVERY:-60}          # how often the guard checks
+BATTERY_FLOOR=${LIDWISE_BATTERY_FLOOR:-20}      # % — below this, on battery, awake mode turns itself off
+DEADMAN_SECONDS=${LIDWISE_DEADMAN_SECONDS:-21600} # 6h — hard ceiling on one session, whatever the power
+GUARD_EVERY=${LIDWISE_GUARD_EVERY:-60}          # how often the guard checks
 
 # Watchdog tuning
 CHECK_EVERY=20        # seconds between probes when healthy
@@ -81,7 +81,7 @@ admin_pmset() {
   fi
   # The guard runs unattended behind a closed lid. An admin dialog there waits
   # forever for someone who isn't there, so it must fail instead of prompting.
-  [ "${VIBECAF_NONINTERACTIVE:-0}" = "1" ] && return 1
+  [ "${LIDWISE_NONINTERACTIVE:-0}" = "1" ] && return 1
   "$OSASCRIPT" -e "do shell script \"$PMSET -a disablesleep $1\" with administrator privileges" >/dev/null 2>&1
 }
 
@@ -241,7 +241,7 @@ netwatch_loop() {
 }
 
 start_netwatch() {
-  [ "${VIBECAF_NO_NETWATCH:-0}" = "1" ] && return 0
+  [ "${LIDWISE_NO_NETWATCH:-0}" = "1" ] && return 0
   netwatch_pid >/dev/null && return 0
   mkdir -p "$(dirname "$NETLOG")"
   nohup "$SELF" __netwatch >/dev/null 2>&1 &
@@ -267,7 +267,7 @@ stop_netwatch() {
 #      job that finished in twenty minutes.
 #
 # The guard is a separate process from the network watchdog on purpose: the
-# watchdog is optional (VIBECAF_NO_NETWATCH) and can exit on its own if there
+# watchdog is optional (LIDWISE_NO_NETWATCH) and can exit on its own if there
 # is no Wi-Fi interface, and neither of those should disarm the battery floor.
 
 guard_loop() {
@@ -302,9 +302,9 @@ guard_loop() {
 # situation to give up on after one attempt.
 guard_auto_off() {  # guard_auto_off <reason>
   netlog "guard: turning awake mode OFF — $1"
-  if VIBECAF_NONINTERACTIVE=1 turn_off >/dev/null 2>&1; then
+  if LIDWISE_NONINTERACTIVE=1 turn_off >/dev/null 2>&1; then
     netlog "guard: awake mode off"
-    "$OSASCRIPT" -e "display notification \"$1\" with title \"Closed-Lid Awake\" subtitle \"Awake mode turned off\"" >/dev/null 2>&1
+    "$OSASCRIPT" -e "display notification \"$1\" with title \"Lidwise\" subtitle \"Awake mode turned off\"" >/dev/null 2>&1
     return 0
   fi
   netlog "guard: could NOT turn awake mode off (no passwordless sudo for pmset?) — retrying in ${GUARD_EVERY}s"
@@ -430,13 +430,13 @@ case "${1:-toggle}" in
     if clamshell_blocked || our_caffeinate_pid >/dev/null; then turn_off; else turn_on; fi ;;
   __netwatch) netwatch_loop ;;
   __guard)    guard_loop ;;
-  *)       echo "usage: vibecaf [on|off|toggle|status [--net]|netlog]" >&2; exit 2 ;;
+  *)       echo "usage: lidwise [on|off|toggle|status [--net]|netlog]" >&2; exit 2 ;;
 esac
 
 # Exercising the guard without waiting six hours:
 #
-#   VIBECAF_DEADMAN_SECONDS=20 VIBECAF_GUARD_EVERY=5 vibecaf on
-#   sleep 40; vibecaf status        # AWAKE MODE: OFF, reason in `vibecaf netlog`
+#   LIDWISE_DEADMAN_SECONDS=20 LIDWISE_GUARD_EVERY=5 lidwise on
+#   sleep 40; lidwise status        # AWAKE MODE: OFF, reason in `lidwise netlog`
 #
-#   VIBECAF_BATTERY_FLOOR=100 VIBECAF_GUARD_EVERY=5 vibecaf on   # on battery,
+#   LIDWISE_BATTERY_FLOOR=100 LIDWISE_GUARD_EVERY=5 lidwise on   # on battery,
 #   fires on the first check because every level is "at or below" the floor.

@@ -3,20 +3,20 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 VERSION=$(tr -d '[:space:]' < "$ROOT/VERSION")
-NAME="Closed-Lid-Awake-$VERSION-macos-universal"
+NAME="Lidwise-$VERSION-macos-universal"
 STAGE="$ROOT/.build/release/$NAME"
 ZIP="$ROOT/dist/$NAME.zip"
 
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
   "$ROOT/scripts/build.sh"
 fi
-[ -d "$ROOT/dist/Closed-Lid Awake.app" ] || {
+[ -d "$ROOT/dist/Lidwise.app" ] || {
   echo "Missing built app. Run scripts/build.sh first." >&2
   exit 1
 }
 rm -rf "$STAGE" "$ZIP" "$ZIP.sha256"
 mkdir -p "$STAGE"
-/usr/bin/ditto "$ROOT/dist/Closed-Lid Awake.app" "$STAGE/Closed-Lid Awake.app"
+/usr/bin/ditto "$ROOT/dist/Lidwise.app" "$STAGE/Lidwise.app"
 cp "$ROOT/scripts/install.sh" "$STAGE/install.sh"
 cp "$ROOT/scripts/uninstall.sh" "$STAGE/uninstall.sh"
 cp "$ROOT/README.md" "$ROOT/SECURITY.md" "$ROOT/RELEASE_CHECKLIST.md" \
