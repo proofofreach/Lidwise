@@ -84,6 +84,7 @@ final class PanelRowModel: ObservableObject {
     @Published var warning = false
     @Published var highlighted = false
     @Published var enabled = true
+    var hidden = false
     // nil: plain row. false/true: disclosure row, collapsed/expanded.
     @Published var expanded: Bool?
     let slice: PanelSlice
@@ -104,6 +105,48 @@ final class PanelRowModel: ObservableObject {
         self.slice = slice
         self.nested = nested
         self.closesMenu = closesMenu
+    }
+}
+
+// Each action has one definition and one state mapping. AppKit carries native
+// keyboard/accessibility behavior; SwiftUI draws the same title and state.
+enum MenuActionID {
+    case extend, settings, batteryFloor, requireAC, history, recovery
+    case notifications, integrations, shortcut, auto, login, doctor, verification
+    case netLog, placement, updates, support, about, turnOffQuit, quit
+}
+enum MenuActionGroup: String {
+    case session = "Session", activity = "Activity", startup = "Startup"
+    case diagnostics = "Diagnostics", help = "Help"
+}
+final class MenuAction {
+    let id: MenuActionID
+    let group: MenuActionGroup?
+    let item: NSMenuItem
+    let model: PanelRowModel
+    let update: (AppDelegate, PanelRowModel) -> Void
+
+    init(_ id: MenuActionID, group: MenuActionGroup? = nil, symbol: String,
+         title: String, selector: Selector, subtitle: String = "",
+         key: String = "", shortcut: String = "", checked: Bool? = nil,
+         expanded: Bool? = nil, closesMenu: Bool = true, slice: PanelSlice = .middle,
+         update: @escaping (AppDelegate, PanelRowModel) -> Void = { _, _ in }) {
+        self.id = id
+        self.group = group
+        self.item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
+        self.model = PanelRowModel(symbol: symbol, title: title, subtitle: subtitle,
+                                   shortcut: shortcut.isEmpty && !key.isEmpty ? "⌘" + key.uppercased() : shortcut,
+                                   checked: checked, expanded: expanded, slice: slice,
+                                   nested: group != nil, closesMenu: closesMenu)
+        self.update = update
+    }
+
+    func synchronize(settingsExpanded: Bool) {
+        item.title = model.title
+        item.toolTip = model.subtitle.isEmpty ? nil : model.subtitle
+        item.isEnabled = model.enabled
+        item.state = model.checked == true ? .on : .off
+        item.isHidden = model.hidden || (group != nil && !settingsExpanded)
     }
 }
 
@@ -476,6 +519,7 @@ struct WorkWindowCard: View {
         case .off:
             return "Off · closing the lid uses normal sleep"
         case .ownedOn:
+            if state.durationSeconds == 0 { return "Full On · no timer" }
             guard let deadline = state.deadline else { return "On · end time unavailable" }
             let end = Date(timeIntervalSince1970: deadline)
             let remaining = max(0, Int(deadline - Date().timeIntervalSince1970))
@@ -501,7 +545,7 @@ struct WorkWindowCard: View {
         return hotToggleHint
     }
 
-    private var hotToggleHint: String { "Changes the manual, time-bounded awake session." }
+    private var hotToggleHint: String { "Changes the manual awake session." }
 
     private var hasActivity: Bool {
         !state.agents.claude.isEmpty || !state.agents.codex.isEmpty || !state.goals.isEmpty
@@ -654,7 +698,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let menu = NSMenu()
     var state = State()
     let cardModel = WorkWindowCardModel(state: State())
-    let runner: CommandRunning = ProcessRunner()
+    let runner: CommandRunning
     lazy var activityWorker = ActivityRefreshWorker(runner: runner)
     lazy var verificationController = GuidedVerificationController(runner: runner, executable: lidwisePath)
     lazy var historyController = SessionHistoryController(runner: runner, executable: lidwisePath)
@@ -662,6 +706,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let mutationQueue = DispatchQueue(label: "app.lidwiseawake.mutations", qos: .userInitiated)
     let revisionGate = RevisionGate()
     var timer: Timer?
+    var readinessSessionID: String?
+    var readinessDeadline: Date?
+    var refreshInFlight = false
+    var refreshAfterActivity = false
+    var pendingNetworkProbe = false
     var hotKeyRef: EventHotKeyRef?
     var hotKeyHandlerRef: EventHandlerRef?
     var hud: NSPanel?
@@ -677,58 +726,105 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static let lastGoodKey = "LastGoodPreferredPosition"
 
     let cardItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    let extendItem = NSMenuItem(title: "Add 30 minutes", action: #selector(extendSession), keyEquivalent: "e")
-    let autoItem = NSMenuItem(title: "Enable awake mode at login", action: #selector(toggleAuto), keyEquivalent: "")
-    let loginItem = NSMenuItem(title: "Show in menu bar at login", action: #selector(toggleLogin), keyEquivalent: "")
-    let recoveryItem = NSMenuItem(title: "Network monitoring", action: #selector(toggleRecovery), keyEquivalent: "")
-    let notificationsItem = NSMenuItem(title: "Notify when agent work changes", action: #selector(toggleNotifications), keyEquivalent: "")
-    let batteryFloorItem = NSMenuItem(title: "Battery floor", action: #selector(setBatteryFloor), keyEquivalent: "")
-    let requireACItem = NSMenuItem(title: "Require AC power", action: #selector(toggleRequireAC), keyEquivalent: "")
-    let historyItem = NSMenuItem(title: "Session history", action: #selector(showSessionHistory), keyEquivalent: "")
-    let integrationsItem = NSMenuItem(title: "Agent integrations", action: #selector(showAgentIntegrations), keyEquivalent: "")
-    let verificationItem = NSMenuItem(title: "Test closed-lid behavior", action: #selector(showVerification), keyEquivalent: "")
-    let shortcutItem = NSMenuItem(title: "Keyboard shortcut", action: #selector(configureShortcut), keyEquivalent: "")
-    let doctorItem = NSMenuItem(title: "Check setup", action: #selector(checkSetup), keyEquivalent: "")
-    let netLogItem = NSMenuItem(title: "Open Wi-Fi watchdog log", action: #selector(openNetLog), keyEquivalent: "")
-    let placementItem = NSMenuItem(title: "Move icon out of the notch", action: #selector(fixPlacement), keyEquivalent: "")
-    let updatesItem = NSMenuItem(title: "Check for updates", action: #selector(openUpdates), keyEquivalent: "")
-    let supportItem = NSMenuItem(title: "Report a problem", action: #selector(openSupport), keyEquivalent: "")
-    let aboutItem = NSMenuItem(title: "About Lidwise", action: #selector(showAbout), keyEquivalent: "")
-    let quitItem = NSMenuItem(title: "Quit menu bar app", action: #selector(quitApp), keyEquivalent: "q")
-    let turnOffQuitItem = NSMenuItem(title: "Turn off and quit", action: #selector(turnOffAndQuit), keyEquivalent: "")
+    lazy var menuActions: [MenuAction] = [
+        MenuAction(.extend, symbol: "clock.badge.plus", title: "Add 30 minutes",
+                   selector: #selector(extendSession), subtitle: "Extend this session · 6h total limit", key: "e") { app, row in
+            row.hidden = !app.state.canAddThirtyMinutes
+            row.enabled = app.state.canAddThirtyMinutes && app.state.pending == nil
+        },
+        MenuAction(.settings, symbol: "gearshape.fill", title: "Settings",
+                   selector: #selector(toggleSettings), subtitle: "Session · startup · diagnostics",
+                   expanded: false, closesMenu: false) { app, row in
+            row.warning = app.iconHidden
+            row.symbol = app.iconHidden ? "exclamationmark.triangle.fill" : "gearshape.fill"
+            row.subtitle = app.iconHidden ? "Icon is behind the notch — fix below" : "Session · startup · diagnostics"
+            row.expanded = app.settingsExpanded
+        },
+        MenuAction(.batteryFloor, group: .session, symbol: "battery.25", title: "Battery floor",
+                   selector: #selector(setBatteryFloor)) { app, row in
+            let available = app.state.defaultBatteryFloor != nil
+            row.enabled = available && app.state.pending == nil
+            row.subtitle = available ? "Next session · stop at \(app.state.selectedBatteryFloor)%" : "Unavailable with this helper version"
+        },
+        MenuAction(.requireAC, group: .session, symbol: "powerplug", title: "Require AC power",
+                   selector: #selector(toggleRequireAC), checked: false, closesMenu: false) { app, row in
+            let available = app.state.defaultRequireAC != nil
+            row.enabled = available && app.state.pending == nil
+            row.checked = app.state.selectedRequireAC
+            row.subtitle = available ? "Next session" : "Unavailable with this helper version"
+        },
+        MenuAction(.history, group: .session, symbol: "clock.arrow.circlepath", title: "Session history",
+                   selector: #selector(showSessionHistory)) { app, row in
+            row.enabled = app.state.lastSession != nil
+            if let last = app.state.lastSession {
+                row.subtitle = "Last: \(SessionText.reason(last.reason)) · restoration \(last.restoration.rawValue)"
+            } else { row.subtitle = "No completed session recorded" }
+        },
+        MenuAction(.recovery, group: .session, symbol: "wifi", title: "Network monitoring",
+                   selector: #selector(toggleRecovery), checked: true, closesMenu: false) { app, row in
+            row.enabled = app.state.pending == nil
+            row.checked = app.state.networkRecovery
+            row.subtitle = app.state.networkRecoveryAvailable == false
+                ? "Read-only checks · repair guidance only" : "Read-only checks; no network settings change"
+        },
+        MenuAction(.notifications, group: .activity, symbol: "bell", title: "Notify when agent work changes",
+                   selector: #selector(toggleNotifications), checked: false, closesMenu: false) { app, row in
+            row.enabled = app.state.pending == nil
+            row.checked = app.state.agentNotifications
+        },
+        MenuAction(.integrations, group: .activity, symbol: "point.3.connected.trianglepath.dotted", title: "Agent integrations",
+                   selector: #selector(showAgentIntegrations), subtitle: "Status, preview, and optional setup"),
+        MenuAction(.shortcut, group: .activity, symbol: "keyboard", title: "Keyboard shortcut",
+                   selector: #selector(configureShortcut)) { app, row in
+            row.enabled = app.state.pending == nil
+            row.subtitle = app.hotkeyLabel.isEmpty ? "Unavailable" : app.hotkeyLabel
+        },
+        MenuAction(.auto, group: .startup, symbol: "sunrise.fill", title: "Enable awake mode at login",
+                   selector: #selector(toggleAuto), checked: false, closesMenu: false) { app, row in
+            let loginOn = FileManager.default.fileExists(atPath: agentPlist)
+            row.checked = UserDefaults.standard.bool(forKey: kAutoEnable)
+            row.enabled = loginOn && app.state.pending == nil
+            row.subtitle = loginOn ? "Starts the selected session with the menu bar app" : "Turn on menu bar login first"
+        },
+        MenuAction(.login, group: .startup, symbol: "menubar.rectangle", title: "Show in menu bar at login",
+                   selector: #selector(toggleLogin), checked: false, closesMenu: false) { app, row in
+            row.enabled = app.state.pending == nil
+            row.checked = FileManager.default.fileExists(atPath: agentPlist)
+        },
+        MenuAction(.doctor, group: .diagnostics, symbol: "stethoscope", title: "Check setup",
+                   selector: #selector(checkSetup), subtitle: "Copyable, read-only diagnostics"),
+        MenuAction(.verification, group: .diagnostics, symbol: "laptopcomputer.and.arrow.down", title: "Test closed-lid behavior",
+                   selector: #selector(showVerification), subtitle: "Guided, read-only measurement"),
+        MenuAction(.netLog, group: .diagnostics, symbol: "doc.text.magnifyingglass", title: "Open Wi-Fi watchdog log",
+                   selector: #selector(openNetLog), shortcut: "↗"),
+        MenuAction(.placement, group: .diagnostics, symbol: "arrow.left.to.line", title: "Move icon out of the notch",
+                   selector: #selector(fixPlacement)) { app, row in
+            row.title = app.iconHidden ? "Icon is behind the notch — try to move it" : "Move icon out of the notch"
+            row.symbol = app.iconHidden ? "exclamationmark.triangle.fill" : "arrow.left.to.line"
+            row.warning = app.iconHidden
+        },
+        MenuAction(.updates, group: .help, symbol: "arrow.down.circle", title: "Check for updates",
+                   selector: #selector(openUpdates), shortcut: "↗"),
+        MenuAction(.support, group: .help, symbol: "ladybug", title: "Report a problem",
+                   selector: #selector(openSupport), shortcut: "↗"),
+        MenuAction(.about, group: .help, symbol: "info.circle", title: "About Lidwise", selector: #selector(showAbout)),
+        MenuAction(.turnOffQuit, symbol: "power", title: "Turn off and quit", selector: #selector(turnOffAndQuit)) { app, row in
+            row.enabled = app.state.ownsSession && app.state.pending == nil
+            row.subtitle = app.state.ownsSession ? "Restore normal sleep first" : "No app-owned session is active"
+        },
+        MenuAction(.quit, symbol: "xmark.square.fill", title: "Quit menu bar app",
+                   selector: #selector(quitApp), key: "q", slice: .bottom) { app, row in
+            row.enabled = app.state.pending == nil
+        }
+    ]
 
-    // Every row below the card is a hosted SwiftUI view drawn from the same
-    // palette, so the menu is one panel top to bottom. The NSMenuItems stay
-    // real items: titles for accessibility, actions for key equivalents.
-    let settingsRow = PanelRowModel(symbol: "gearshape.fill", title: "Settings",
-                                    subtitle: "Session · startup · diagnostics", expanded: false, closesMenu: false)
-    let extendRow = PanelRowModel(symbol: "clock.badge.plus", title: "Add 30 minutes",
-                                  subtitle: "Extend this session · 6h total limit", shortcut: "⌘E")
-    let batteryFloorRow = PanelRowModel(symbol: "battery.25", title: "Battery floor", checked: nil, nested: true)
-    let requireACRow = PanelRowModel(symbol: "powerplug", title: "Require AC power", checked: false, nested: true, closesMenu: false)
-    let historyRow = PanelRowModel(symbol: "clock.arrow.circlepath", title: "Session history", nested: true)
-    let integrationsRow = PanelRowModel(symbol: "point.3.connected.trianglepath.dotted", title: "Agent integrations",
-                                        subtitle: "Status, preview, and optional setup", nested: true)
-    let verificationRow = PanelRowModel(symbol: "laptopcomputer.and.arrow.down", title: "Test closed-lid behavior",
-                                        subtitle: "Guided, read-only measurement", nested: true)
-    let autoRow = PanelRowModel(symbol: "sunrise.fill", title: "Enable awake mode at login", checked: false, nested: true, closesMenu: false)
-    let loginRow = PanelRowModel(symbol: "menubar.rectangle", title: "Show in menu bar at login", checked: false, nested: true, closesMenu: false)
-    let recoveryRow = PanelRowModel(symbol: "wifi", title: "Network monitoring", subtitle: "Read-only checks; no network settings change", checked: true, nested: true, closesMenu: false)
-    let notificationsRow = PanelRowModel(symbol: "bell", title: "Notify when agent work changes", checked: false, nested: true, closesMenu: false)
-    let shortcutRow = PanelRowModel(symbol: "keyboard", title: "Keyboard shortcut", nested: true)
-    let doctorRow = PanelRowModel(symbol: "stethoscope", title: "Check setup", subtitle: "Copyable, read-only diagnostics", nested: true)
-    let netLogRow = PanelRowModel(symbol: "doc.text.magnifyingglass", title: "Open Wi-Fi watchdog log", shortcut: "↗", nested: true)
-    let placementRow = PanelRowModel(symbol: "arrow.left.to.line", title: "Move icon out of the notch", nested: true)
-    let updatesRow = PanelRowModel(symbol: "arrow.down.circle", title: "Check for updates", shortcut: "↗", nested: true)
-    let supportRow = PanelRowModel(symbol: "ladybug", title: "Report a problem", shortcut: "↗", nested: true)
-    let aboutRow = PanelRowModel(symbol: "info.circle", title: "About Lidwise", nested: true)
-    let turnOffQuitRow = PanelRowModel(symbol: "power", title: "Turn off and quit", subtitle: "Restore normal sleep first")
-    let quitRow = PanelRowModel(symbol: "xmark.square.fill", title: "Quit menu bar app", shortcut: "⌘Q", slice: .bottom)
+    func action(_ id: MenuActionID) -> MenuAction { menuActions.first { $0.id == id }! }
 
-    // Progressive disclosure: the menu opens to the card, the one primary
-    // action, and Quit. Startup and tool rows live in a drawer under
-    // "Settings" and are hidden NSMenuItems until it is opened.
-    let settingsItem = NSMenuItem(title: "Settings", action: #selector(toggleSettings), keyEquivalent: "")
+    init(runner: CommandRunning = ProcessRunner()) {
+        self.runner = runner
+        super.init()
+    }
+
     var drawerItems: [NSMenuItem] = []
     var settingsExpanded = false
 
@@ -745,40 +841,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.appearance = NSAppearance(named: .darkAqua)
 
         installStatusCard()
-        attach(extendItem, extendRow) { [weak self] in self?.extendSession() }
-        menu.addItem(dividerItem())
-        attach(settingsItem, settingsRow) { [weak self] in self?.toggleSettings() }
-        addDrawerItem(passiveItem(PanelLabel(text: "Session")))
-        attach(batteryFloorItem, batteryFloorRow) { [weak self] in self?.setBatteryFloor() }
-        attach(requireACItem, requireACRow) { [weak self] in self?.toggleRequireAC() }
-        attach(historyItem, historyRow) { [weak self] in self?.showSessionHistory() }
-        attach(recoveryItem, recoveryRow) { [weak self] in self?.toggleRecovery() }
-        drawerItems.append(contentsOf: [batteryFloorItem, requireACItem, historyItem])
-        addDrawerItem(passiveItem(PanelLabel(text: "Activity")))
-        attach(notificationsItem, notificationsRow) { [weak self] in self?.toggleNotifications() }
-        attach(integrationsItem, integrationsRow) { [weak self] in self?.showAgentIntegrations() }
-        attach(shortcutItem, shortcutRow) { [weak self] in self?.configureShortcut() }
-        drawerItems.append(contentsOf: [recoveryItem, notificationsItem, integrationsItem, shortcutItem])
-        addDrawerItem(passiveItem(PanelLabel(text: "Startup")))
-        attach(autoItem, autoRow) { [weak self] in self?.toggleAuto() }
-        attach(loginItem, loginRow) { [weak self] in self?.toggleLogin() }
-        drawerItems.append(contentsOf: [autoItem, loginItem])
-        addDrawerItem(passiveItem(PanelLabel(text: "Diagnostics")))
-        attach(doctorItem, doctorRow) { [weak self] in self?.checkSetup() }
-        attach(verificationItem, verificationRow) { [weak self] in self?.showVerification() }
-        attach(netLogItem, netLogRow) { [weak self] in self?.openNetLog() }
-        attach(placementItem, placementRow) { [weak self] in self?.fixPlacement() }
-        drawerItems.append(contentsOf: [doctorItem, verificationItem, netLogItem, placementItem])
-        addDrawerItem(passiveItem(PanelLabel(text: "Help")))
-        attach(updatesItem, updatesRow) { [weak self] in self?.openUpdates() }
-        attach(supportItem, supportRow) { [weak self] in self?.openSupport() }
-        attach(aboutItem, aboutRow) { [weak self] in self?.showAbout() }
-        drawerItems.append(contentsOf: [updatesItem, supportItem, aboutItem])
-        addDrawerItem(passiveItem(Color.clear.frame(width: Ink.panelWidth, height: 6).panelSlice(.middle)))
+        installActionRows()
         setDrawer(expanded: false)
-        menu.addItem(dividerItem())
-        attach(turnOffQuitItem, turnOffQuitRow) { [weak self] in self?.turnOffAndQuit() }
-        attach(quitItem, quitRow) { [weak self] in self?.quitApp() }
 
         makeStatusItem(preferred: UserDefaults.standard.object(forKey: Self.lastGoodKey) as? Double)
 
@@ -791,11 +855,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             refresh()
         }
-        // 60s, not 20s. menuWillOpen refreshes on demand, so the timer only has
-        // to catch state changed behind the app's back — someone running
-        // `lidwise off` in a terminal, or the guard disarming itself. A minute
-        // is ample for that, and it is three times less work while idle.
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in self.refresh() }
 
         // The menu bar is still settling at login — every other login item is
         // claiming its slot at the same moment — so measuring immediately reads
@@ -938,10 +997,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // including a real network probe, since a menu the user just opened is the
     // one moment the 8.5s worst case is worth paying for. The menu updates in
     // place when it lands.
-    private func attach(_ item: NSMenuItem, _ model: PanelRowModel, onClick: @escaping () -> Void) {
-        if item.action != #selector(NSApplication.terminate(_:)) { item.target = self }
-        item.view = PanelRowHostView(model: model, onClick: onClick)
-        menu.addItem(item)
+    func installActionRows() {
+        menu.autoenablesItems = false
+        var previousGroup: MenuActionGroup?
+        for row in menuActions {
+            if row.id == .settings { menu.addItem(dividerItem()) }
+            if row.id == .turnOffQuit {
+                addDrawerItem(passiveItem(Color.clear.frame(width: Ink.panelWidth, height: 6).panelSlice(.middle)))
+                menu.addItem(dividerItem())
+            }
+            if let group = row.group, group != previousGroup {
+                addDrawerItem(passiveItem(PanelLabel(text: group.rawValue)))
+            }
+            previousGroup = row.group
+            row.item.target = self
+            row.item.view = PanelRowHostView(model: row.model) { [weak self, weak row] in
+                guard let self, let row, let selector = row.item.action else { return }
+                NSApp.sendAction(selector, to: self, from: row.item)
+            }
+            menu.addItem(row.item)
+            row.synchronize(settingsExpanded: settingsExpanded)
+        }
     }
 
     private func dividerItem() -> NSMenuItem { passiveItem(PanelDivider()) }
@@ -964,7 +1040,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func setDrawer(expanded: Bool) {
         settingsExpanded = expanded
-        settingsRow.expanded = expanded
+        action(.settings).model.expanded = expanded
+        for row in menuActions { row.synchronize(settingsExpanded: expanded) }
         for item in drawerItems { item.isHidden = !expanded }
     }
 
@@ -995,13 +1072,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func refresh(probeNet: Bool = false, includeActivity: Bool = true) {
-        guard state.pending == nil else { return }
+        guard state.pending == nil, !refreshInFlight else {
+            pendingNetworkProbe = pendingNetworkProbe || probeNet
+            return
+        }
+        refreshInFlight = true
         let revision = revisionGate.issue()
         if includeActivity {
             activityWorker.refreshIfNeeded(ownedSession: state.phase == .ownedOn, executable: lidwisePath) { [weak self] in
                 DispatchQueue.main.async {
-                    guard let self, self.revisionGate.accepts(revision), self.state.pending == nil else { return }
-                    self.refresh(includeActivity: false)
+                    guard let self else { return }
+                    self.refreshAfterActivity = true
+                    self.refreshQueuedObservation()
                 }
             }
         }
@@ -1019,6 +1101,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                            userInfo: [NSLocalizedDescriptionKey: result.failureDescription]))
             }
             DispatchQueue.main.async {
+                self.refreshInFlight = false
+                defer {
+                    self.scheduleRefresh()
+                    self.refreshQueuedObservation()
+                }
                 guard self.revisionGate.accepts(revision), self.state.pending == nil else { return }
                 switch parsed {
                 case .success(let newState): self.state = newState
@@ -1029,81 +1116,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // Pure UI, no subprocesses — safe to call on the main thread as often as
-    // you like, and the only thing that touches AppKit.
+    private func refreshQueuedObservation() {
+        guard state.pending == nil, !refreshInFlight,
+              pendingNetworkProbe || refreshAfterActivity else { return }
+        let probe = pendingNetworkProbe
+        pendingNetworkProbe = false
+        refreshAfterActivity = false
+        refresh(probeNet: probe, includeActivity: false)
+    }
+
+    // One timer handles external CLI changes and the short readiness burst.
+    // It remains a fallback while an observation is in flight or discarded.
+    func scheduleRefresh() {
+        timer?.invalidate()
+        timer = nil
+        if state.ownsSession, let session = state.sessionID {
+            if readinessSessionID != session {
+                // An activation whose verification failed can already have a
+                // burst deadline before its session ID is first observed.
+                if readinessSessionID != nil || readinessDeadline == nil {
+                    readinessDeadline = Date().addingTimeInterval(40)
+                }
+                readinessSessionID = session
+            }
+        } else if state.phase != .unknown {
+            // Unknown can be a transient read failure. Keep the original burst
+            // deadline until a confirmed off/external state or a new session.
+            readinessSessionID = nil
+            readinessDeadline = nil
+        }
+        guard state.pending == nil else { return }
+        let recovering = !state.recoveryReady && (readinessDeadline.map { Date() < $0 } ?? false)
+        timer = Timer.scheduledTimer(withTimeInterval: recovering ? 1 : 60, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.scheduleRefresh()
+            self.refresh(includeActivity: !recovering)
+        }
+    }
+
+    // Pure rendering: no subprocesses or refresh scheduling.
     func applyState() {
         item.button?.image = currentImage()
         switch state.phase {
-        case .ownedOn: item.button?.toolTip = "Work window on until its shown deadline"
+        case .ownedOn: item.button?.toolTip = state.durationSeconds == 0 ? "Full On · no timer" : "Work window on until its shown deadline"
         case .externalOn: item.button?.toolTip = "Another tool is preventing sleep"
         case .unknown: item.button?.toolTip = "Awake state unavailable — check setup"
         case .off: item.button?.toolTip = "Work window off — normal sleep applies"
         }
         updateStatusCard()
 
-        let canExtend = state.canAddThirtyMinutes
-        extendItem.isHidden = !canExtend
-        extendItem.isEnabled = canExtend && state.pending == nil
-        extendRow.enabled = extendItem.isEnabled
-
-        placementItem.title = iconHidden
-            ? "Icon is behind the notch — try to move it"
-            : "Move icon out of the notch"
-        placementRow.title = placementItem.title
-        placementRow.symbol = iconHidden ? "exclamationmark.triangle.fill" : "arrow.left.to.line"
-        placementRow.warning = iconHidden
-        settingsRow.warning = iconHidden
-        settingsRow.symbol = iconHidden ? "exclamationmark.triangle.fill" : "gearshape.fill"
-        settingsRow.subtitle = iconHidden ? "Icon is behind the notch — fix below" : "Session · startup · diagnostics"
-
-        let autoOn = UserDefaults.standard.bool(forKey: kAutoEnable)
-        let loginOn = FileManager.default.fileExists(atPath: agentPlist)
-        autoItem.state = autoOn ? .on : .off
-        loginItem.state = loginOn ? .on : .off
-        autoRow.checked = autoOn
-        loginRow.checked = loginOn
-        autoItem.isEnabled = loginOn && state.pending == nil
-        autoRow.enabled = autoItem.isEnabled
-        autoRow.subtitle = loginOn ? "Starts a bounded session with the menu bar app" : "Turn on menu bar login first"
-        recoveryRow.checked = state.networkRecovery
-        recoveryRow.subtitle = state.networkRecoveryAvailable == false
-            ? "Read-only checks · repair guidance only"
-            : "Read-only checks; no network settings change"
-        notificationsRow.checked = state.agentNotifications
-        let batteryPolicyAvailable = state.defaultBatteryFloor != nil
-        let acPolicyAvailable = state.defaultRequireAC != nil
-        batteryFloorRow.subtitle = batteryPolicyAvailable
-            ? "Next session · stop at \(state.selectedBatteryFloor)%"
-            : "Unavailable with this helper version"
-        requireACRow.checked = state.selectedRequireAC
-        requireACRow.subtitle = acPolicyAvailable ? "Next session" : "Unavailable with this helper version"
-        let historyAvailable = state.lastSession != nil
-        if let last = state.lastSession {
-            historyRow.subtitle = "Last: \(SessionText.reason(last.reason)) · restoration \(last.restoration.rawValue)"
-        } else {
-            historyRow.subtitle = "No completed session recorded"
+        for row in menuActions {
+            row.update(self, row.model)
+            row.synchronize(settingsExpanded: settingsExpanded)
         }
-        shortcutRow.subtitle = hotkeyLabel.isEmpty ? "Unavailable" : hotkeyLabel
-        for (item, row) in [(recoveryItem, recoveryRow), (notificationsItem, notificationsRow),
-                            (shortcutItem, shortcutRow), (loginItem, loginRow)] {
-            item.isEnabled = state.pending == nil
-            row.enabled = item.isEnabled
-        }
-        batteryFloorItem.isEnabled = batteryPolicyAvailable && state.pending == nil
-        batteryFloorRow.enabled = batteryFloorItem.isEnabled
-        requireACItem.isEnabled = acPolicyAvailable && state.pending == nil
-        requireACRow.enabled = requireACItem.isEnabled
-        historyItem.isEnabled = historyAvailable
-        historyRow.enabled = historyAvailable
-        integrationsItem.isEnabled = true
-        integrationsRow.enabled = true
-        verificationItem.isEnabled = true
-        verificationRow.enabled = true
-        turnOffQuitItem.isEnabled = state.ownsSession && state.pending == nil
-        turnOffQuitRow.enabled = turnOffQuitItem.isEnabled
-        turnOffQuitRow.subtitle = state.ownsSession ? "Restore normal sleep first" : "No app-owned session is active"
-        quitItem.isEnabled = state.pending == nil
-        quitRow.enabled = quitItem.isEnabled
     }
 
     func installStatusCard() {
@@ -1150,27 +1215,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func performMutation(arguments: [String], pending: PendingAction,
                          accepts: @escaping (State) -> Bool,
                          successMessage: ((State) -> String)? = nil,
+                         timeout: TimeInterval = 30, showFeedback: Bool = true,
                          completion: (() -> Void)? = nil) {
         guard state.pending == nil else { return }
         state.pending = pending
         state.commandError = nil
+        scheduleRefresh()
         applyState()
         let revision = revisionGate.issue()
         mutationQueue.async {
-            let command = self.runner.run(executable: lidwisePath, arguments: arguments, timeout: 30)
+            let command = self.runner.run(executable: lidwisePath, arguments: arguments, timeout: timeout)
             let verification = self.runner.run(executable: lidwisePath,
                                                arguments: ["status", "--json"], timeout: 5)
             let resolved = StateReconciler.afterCommand(command, verification: verification, accepts: accepts)
             DispatchQueue.main.async {
+                defer {
+                    self.scheduleRefresh()
+                    self.refreshQueuedObservation()
+                }
                 guard self.revisionGate.accepts(revision) else { return }
                 self.state = resolved
+                if pending == .turningOn && resolved.phase == .unknown {
+                    self.readinessSessionID = nil
+                    self.readinessDeadline = Date().addingTimeInterval(40)
+                }
                 self.applyState()
                 if let error = resolved.commandError {
-                    self.showHUD(text: error, symbol: "exclamationmark.triangle.fill")
+                    if showFeedback { self.showHUD(text: error, symbol: "exclamationmark.triangle.fill") }
                 } else {
                     let on = resolved.phase == .ownedOn
-                    self.showHUD(text: successMessage?(resolved) ?? (on ? "Work window on — verified" : "Work window off — verified"),
-                                 symbol: on ? "cup.and.saucer.fill" : "moon.zzz.fill")
+                    if showFeedback {
+                        self.showHUD(text: successMessage?(resolved) ?? (on ? "Work window on — verified" : "Work window off — verified"),
+                                     symbol: on ? "cup.and.saucer.fill" : "moon.zzz.fill")
+                    }
                     completion?()
                 }
             }
@@ -1326,22 +1403,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func performSetting(arguments: [String], verify: @escaping (State) -> Bool) {
-        guard state.pending == nil else { return }
-        state.pending = .saving
-        state.commandError = nil
-        applyState()
-        let revision = revisionGate.issue()
-        mutationQueue.async {
-            let command = self.runner.run(executable: lidwisePath, arguments: arguments, timeout: 10)
-            let verification = self.runner.run(executable: lidwisePath,
-                                               arguments: ["status", "--json"], timeout: 5)
-            let resolved = StateReconciler.afterCommand(command, verification: verification, accepts: verify)
-            DispatchQueue.main.async {
-                guard self.revisionGate.accepts(revision) else { return }
-                self.state = resolved
-                self.applyState()
-            }
-        }
+        performMutation(arguments: arguments, pending: .saving, accepts: verify,
+                        timeout: 10, showFeedback: false)
     }
 
     func setDuration(_ seconds: Int) {
@@ -1559,6 +1622,9 @@ private var previewState: State = {
                       goals: GoalCounts(active: 4, stalled: 1, completed: 0, failed: 0),
                       observedAt: Date().timeIntervalSince1970)
     switch previewScenario {
+    case "full-on":
+        state.durationSeconds = 0; state.defaultDurationSeconds = 0
+        state.deadline = nil; state.remainingSeconds = nil; state.canExtend = false
     case "off":
         state.phase = .off; state.sessionID = nil; state.deadline = nil; state.remainingSeconds = nil
         state.recoveryReady = false; state.agents = AgentSummary(claude: .zero, codex: .zero); state.goals = .zero

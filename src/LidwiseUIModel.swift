@@ -401,10 +401,11 @@ final class RevisionGate {
 }
 
 enum SessionDuration {
-    static let presets = [1_800, 3_600, 7_200, 21_600]
+    static let presets = [1_800, 3_600, 7_200, 21_600, 0]
 
     static func label(for seconds: Int) -> String {
         switch seconds {
+        case 0: return "Full On"
         case 1_800: return "30m"
         case 3_600: return "1h"
         case 7_200: return "2h"

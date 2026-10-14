@@ -42,6 +42,7 @@ HOTSPOT_SUBNET=${VIBECAF_HOTSPOT_SUBNET:-172.20.10.}
 
 LIB_DIR="$SELF_DIR/lib/lidwise"; [ -d "$LIB_DIR" ] || LIB_DIR="$SELF_DIR/../lib/lidwise"
 source "$LIB_DIR/session.sh"
+source "$LIB_DIR/guardian.sh"
 source "$LIB_DIR/history.sh"
 if valid_duration "$ACTIVATION_GRACE"; then ACTIVATION_GRACE=$(uint_normalize "$ACTIVATION_GRACE"); else ACTIVATION_GRACE=30; fi
 PIDFILE=$(runtime_file caffeinate.pid); NETPIDFILE=$(runtime_file network.pid)
@@ -174,9 +175,9 @@ guard_check_once_locked() {
   [ "$(sleep_disabled_state)" = 1 ] && session_active || return 0
   if modern_session_owned && ! session_valid; then guard_auto_off "owned session policy is invalid"; return; fi
   session_touch || true; now=$(date +%s); deadline=$(read_uint "$SESSION_DIR" deadline 0)
-  if [ "$deadline" -eq 0 ] || [ "$now" -ge "$deadline" ]; then guard_auto_off "session deadline passed"; return; fi
+  if [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; then guard_auto_off "session deadline passed"; return; fi
   remaining=$((deadline - now)); warned=$(read_uint "$SESSION_DIR" warned_deadline 0)
-  if [ "$remaining" -le 300 ] && [ "$warned" -ne "$deadline" ]; then
+  if [ "$deadline" -gt 0 ] && [ "$remaining" -le 300 ] && [ "$warned" -ne "$deadline" ]; then
     if write_field "$SESSION_DIR" warned_deadline "$deadline"; then
       notify_event "Awake session ending soon" "Session ends in 5 minutes or less. Use 'lidwise extend --by SECONDS' to extend it."
     fi
@@ -256,23 +257,22 @@ guardian_check_once() {
   state=$(read_field "$SESSION_DIR" state)
   now=$(date +%s); deadline=$(read_uint "$SESSION_DIR" deadline 0)
   id=$(current_session_id)
-  if [ -n "$id" ]; then
-    write_field "$SESSION_DIR" guardian_session "$id" || true
-    write_field "$SESSION_DIR" guardian_heartbeat "$now" || true
-  fi
   if modern_session_owned && ! session_valid; then guardian_recover "owned session policy is invalid"; return; fi
   if [ "$state" = enabling ]; then
     started=$(read_uint "$SESSION_DIR" started_at 0); age=$((now-started))
-    if [ "$deadline" -eq 0 ] || [ "$now" -ge "$deadline" ] || [ "$age" -lt 0 ] || [ "$age" -ge "$ACTIVATION_GRACE" ]; then
+    if { [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; } || [ "$age" -lt 0 ] || [ "$age" -ge "$ACTIVATION_GRACE" ]; then
       guardian_recover "session activation timed out"
     elif ! session_enabler_alive; then guardian_recover "session activation did not finish"; fi
     return
   fi
+  if [ -n "$id" ]; then
+    write_field "$SESSION_DIR" guardian_session "$id" || true
+    write_field "$SESSION_DIR" guardian_heartbeat "$now" || true
+  fi
   heartbeat=$(read_uint "$SESSION_DIR" heartbeat 0); age=$((now-heartbeat))
   if [ "$heartbeat" -eq 0 ] || [ "$age" -lt 0 ] || [ "$age" -gt "$GUARDIAN_GRACE" ]; then guardian_recover "guard heartbeat lost"; return; fi
-  if [ "$deadline" -eq 0 ] || [ "$now" -ge "$deadline" ]; then guardian_recover "session deadline passed"; fi
+  if [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; then guardian_recover "session deadline passed"; fi
 }
-guardian_loop() { while :; do guardian_check_once || true; sleep "$GUARDIAN_EVERY"; done; }
 
 preflight_on() {
   local blob src pct thermal
@@ -310,6 +310,8 @@ turn_on_locked() {
         start_guard || { echo "Owned session exists, but its safety guard could not start." >&2; return 1; }
         start_observation || true; session_id=$(current_session_id)
         [ "$(read_field "$SESSION_DIR" recovery 1)" = 0 ] || start_network_monitor || true
+        activation_session=$session_id
+        write_field "$SESSION_DIR" guardian_wake "$session_id" || true
         echo "AWAKE MODE: ON"; echo "Existing session retained; its deadline was not extended."; return
       fi
       turn_off_locked 0 >/dev/null || return 1 ;;
@@ -325,16 +327,20 @@ turn_on_locked() {
     activation_rollback "$id"; return 1
   fi
   if ! start_caffeinate || ! session_activate || ! start_guard; then activation_rollback "$id"; return 1; fi
+  activation_session=$id
+  write_field "$SESSION_DIR" guardian_wake "$id" || true
   start_observation || true
   session_id=$id
   [ "$(read_field "$SESSION_DIR" recovery 1)" = 0 ] || start_network_monitor || true
-  blob=$(batt_blob || true); echo "AWAKE MODE: ON"; echo "Session: $id"; echo "Deadline: $((now+duration)) ($duration seconds)"; echo "Power: $(power_source "$blob") $(battery_pct "$blob")"
+  blob=$(batt_blob || true); echo "AWAKE MODE: ON"; echo "Session: $id"; if [ "$duration" -eq 0 ]; then echo "Full On: no timer"; else echo "Deadline: $((now+duration)) ($duration seconds)"; fi; echo "Power: $(power_source "$blob") $(battery_pct "$blob")"
 }
 turn_on() {
-  local duration=${1:-$(config_duration)} rc
-  valid_duration "$duration" || { echo "Duration must be an integer from 1 to 21600 seconds." >&2; return 2; }
+  local duration=${1:-$(config_duration)} rc activation_session=""
+  valid_session_duration "$duration" || { echo "Duration must be 0 (Full On) or an integer from 1 to 21600 seconds." >&2; return 2; }
   duration=$(uint_normalize "$duration")
-  lock_acquire || return 1; turn_on_locked "$duration"; rc=$?; lock_release; return "$rc"
+  lock_acquire || return 1; turn_on_locked "$duration"; rc=$?; lock_release
+  if [ "$rc" = 0 ] && [ -n "$activation_session" ]; then guardian_wait_for_session "$activation_session" || true; fi
+  return "$rc"
 }
 turn_off_locked() {
   local force=$1 reason=${2:-manual} phase id; phase=$(session_phase)
@@ -376,11 +382,13 @@ turn_off() {
   turn_off_locked "$force" "$reason"; rc=$?; lock_release; return "$rc"
 }
 toggle() {
-  local phase rc; lock_acquire || return 1; phase=$(session_phase)
+  local phase rc activation_session=""; lock_acquire || return 1; phase=$(session_phase)
   case "$phase" in off) turn_on_locked "$(config_duration)"; rc=$? ;; owned-on) turn_off_locked 0 toggle; rc=$? ;;
     external-on) echo "Sleep is blocked by another tool; toggle made no change." >&2; rc=1 ;;
     unknown) echo "Cannot read SleepDisabled; refusing to change power state." >&2; rc=1 ;; esac
-  lock_release; return "$rc"
+  lock_release
+  if [ "$rc" = 0 ] && [ -n "$activation_session" ]; then guardian_wait_for_session "$activation_session" || true; fi
+  return "$rc"
 }
 
 extend_session() {
@@ -440,7 +448,9 @@ status_json() {
     id=$(current_session_id)
     if session_valid; then
       started=$(read_uint "$SESSION_DIR" started_at 0); deadline=$(read_uint "$SESSION_DIR" deadline 0)
-      duration=$((deadline - started)); floor=$(read_uint "$SESSION_DIR" battery_floor "$floor")
+      duration=$(read_uint "$SESSION_DIR" duration_seconds 0); [ "$deadline" -eq 0 ] || duration=$((deadline - started))
+      [ "$deadline" -gt 0 ] || deadline=""
+      floor=$(read_uint "$SESSION_DIR" battery_floor "$floor")
       require_ac=$(read_uint "$SESSION_DIR" require_ac 0)
       recovery=$(read_field "$SESSION_DIR" recovery "$recovery"); notifications=$(read_field "$SESSION_DIR" notifications "$notifications")
     elif legacy_session_valid; then
@@ -493,7 +503,7 @@ status_human() {
   echo "AWAKE MODE: $label"; echo "Phase: $phase"
   if [ "$phase" = owned-on ]; then id=$(current_session_id); deadline=$(read_uint "$SESSION_DIR" deadline 0); now=$(date +%s)
     remaining=$((deadline-now)); [ "$remaining" -ge 0 ] || remaining=0
-    echo "Session: $id"; echo "Auto-off in: $((remaining/3600))h $(((remaining%3600)/60))m"; echo "Battery floor: $(read_uint "$SESSION_DIR" battery_floor "$BATTERY_FLOOR")%"
+    echo "Session: $id"; if [ "$deadline" -eq 0 ] && session_valid; then echo "Full On: no timer"; else echo "Auto-off in: $((remaining/3600))h $(((remaining%3600)/60))m"; fi; echo "Battery floor: $(read_uint "$SESSION_DIR" battery_floor "$BATTERY_FLOOR")%"
     echo "Requires AC: $([ "$(read_uint "$SESSION_DIR" require_ac 0)" = 1 ] && echo yes || echo no)"
   else echo "Auto-off in: n/a"; echo "Battery floor: $(config_battery_floor)%"; echo "Requires AC: $([ "$(config_require_ac)" = 1 ] && echo yes || echo no)"; fi
   echo "Guard pid: $(guard_pid 2>/dev/null || echo none)"; echo "Crash guardian: $(guardian_status)"; echo "Thermal: $(thermal_state)"
@@ -516,7 +526,7 @@ config_get() {
 }
 config_set_locked() {
   local key=$1 value=$2 phase; state_init || return 1
-  case "$key" in duration) valid_duration "$value" || { echo "Duration must be an integer from 1 to 21600 seconds." >&2; return 2; }
+  case "$key" in duration) valid_session_duration "$value" || { echo "Duration must be 0 (Full On) or an integer from 1 to 21600 seconds." >&2; return 2; }
       value=$(uint_normalize "$value"); write_field "$CONFIG_DIR" duration "$value" || return 1 ;;
     battery-floor) valid_percent "$value" || { echo "Battery floor must be an integer from 1 to 100 percent." >&2; return 2; }
       value=$(uint_normalize "$value"); write_field "$CONFIG_DIR" battery-floor "$value" || return 1; BATTERY_FLOOR=$value ;;

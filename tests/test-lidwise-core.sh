@@ -3,8 +3,9 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/lidwise-core.XXXXXX")
-sleeper=""; orphan=""; activator=""; protected_root=""; protected_child=""
+sleeper=""; orphan=""; activator=""; protected_root=""; protected_child=""; guardian=""
 cleanup() {
+  [ -z "$guardian" ] || kill "$guardian" 2>/dev/null || true
   [ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null || true
   [ -z "$orphan" ] || kill "$orphan" 2>/dev/null || true
   if [ -n "$activator" ]; then kill -CONT "$activator" 2>/dev/null || true; kill "$activator" 2>/dev/null || true; fi
@@ -336,6 +337,30 @@ before=$(wc -l < "$MOCK_PMSET_LOG")
 doctor_output=$($VIBECAF doctor)
 grep -q '^power phase: off$' <<< "$doctor_output"
 [ "$(wc -l < "$MOCK_PMSET_LOG")" -eq "$before" ]
+
+# Failure cases: on/toggle return before a real guardian acknowledges activation;
+# waiting under the mutation lock starves an off-state guardian. Power is mocked.
+env MOCK_PMSET_SET1_DELAY=1 $VIBECAF on --for 60 > "$TEST_ROOT/activation-output" & activator=$!
+for attempt in {1..80}; do [ ! -f "$VIBECAF_STATE_DIR/session/id" ] || break; sleep 0.05; done
+$VIBECAF __guardian > "$TEST_ROOT/guardian-output" 2>&1 & guardian=$!
+wait "$activator"; activator=""
+json=$($VIBECAF status --json)
+if ! grep -q '"recovery_ready":true' <<< "$json"; then
+  echo "Activation acknowledgement failed: $json" >&2
+  cat "$TEST_ROOT/guardian-output" >&2
+  exit 1
+fi
+$VIBECAF off >/dev/null
+$VIBECAF toggle >/dev/null
+json=$($VIBECAF status --json)
+if ! grep -q '"recovery_ready":true' <<< "$json"; then
+  echo "Activation acknowledgement failed: $json" >&2
+  cat "$TEST_ROOT/guardian-output" >&2
+  exit 1
+fi
+$VIBECAF off >/dev/null
+kill "$guardian"; wait "$guardian" 2>/dev/null || true; guardian=""
+echo 'activation and toggle await guardian outside the session lock: ok'
 
 # Maintenance holds the mutation lock and refuses non-off state.
 $VIBECAF __maintenance -- /usr/bin/true

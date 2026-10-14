@@ -24,7 +24,7 @@ history_record_valid() {
   local id=$1 started=$2 ended=$3 deadline=$4 reason=$5 restoration=$6 battery_start=$7 battery_end=$8 power_start=$9 power_end=${10}
   valid_session_id "$id" && [ "${#id}" -le 120 ] || return 1
   valid_epoch "$started" && valid_epoch "$ended" && valid_epoch "$deadline" || return 1
-  [ "$(uint_normalize "$deadline")" -ge "$(uint_normalize "$started")" ] || return 1
+  { [ "$(uint_normalize "$deadline")" -eq 0 ] || [ "$(uint_normalize "$deadline")" -ge "$(uint_normalize "$started")" ]; } || return 1
   [ -n "$reason" ] && [ "${#reason}" -le 200 ] || return 1
   case "$reason" in *$'\t'*|*$'\r'*|*$'\n'*|*'|'*) return 1 ;; esac
   printf '%s' "$reason" | LC_ALL=C grep -q '^[ -~][ -~]*$' || return 1
@@ -71,7 +71,7 @@ history_capture_current() {
   local reason=$1 restoration=$2 id started deadline battery_start power_start blob battery_end power_end ended
   id=$(current_session_id); valid_session_id "$id" || return 1
   started=$(read_epoch "$SESSION_DIR" started_at 0); deadline=$(read_epoch "$SESSION_DIR" deadline 0)
-  [ "$started" -gt 0 ] && [ "$deadline" -ge "$started" ] || return 1
+  [ "$started" -gt 0 ] && { [ "$deadline" -eq 0 ] || [ "$deadline" -ge "$started" ]; } || return 1
   battery_start=$(read_field "$SESSION_DIR" battery_start -); valid_battery_percent "$battery_start" || battery_start=-
   power_start=$(read_field "$SESSION_DIR" power_start -)
   case "$power_start" in AC|Battery|unknown) ;; *) power_start=- ;; esac

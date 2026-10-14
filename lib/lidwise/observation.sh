@@ -1,5 +1,6 @@
 #!/bin/bash
 # Optional work observation. Sourced by lidwise.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/private-paths.sh"
 
 # ── goal registry ────────────────────────────────────────────────────────────
 #
@@ -240,12 +241,6 @@ agent_valid_session() {
   case "$1" in *$'\n'*|*$'\t'*) return 1 ;; esac
 }
 
-agent_private_dir() {
-  [ -d "$1" ] && [ ! -L "$1" ] || return 1
-  [ "$(stat -f %u "$1" 2>/dev/null)" = "$(id -u)" ] || return 1
-  case "$(stat -f %Lp "$1" 2>/dev/null)" in 700|500) return 0 ;; *) return 1 ;; esac
-}
-
 agent_private_file() {
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
   [ "$(stat -f %u "$1" 2>/dev/null)" = "$(id -u)" ] || return 1
@@ -257,13 +252,13 @@ agents_prepare_runtime() {
   [ ! -L "$RUNTIME_DIR" ] || return 1
   if [ ! -d "$RUNTIME_DIR" ]; then mkdir -m 700 "$RUNTIME_DIR" || return 1; fi
   chmod 700 "$RUNTIME_DIR" || return 1
-  agent_private_dir "$RUNTIME_DIR" || return 1
+  owned_dir_valid "$RUNTIME_DIR" "$(id -u)" 700 500 || return 1
   [ ! -L "$AGENT_RUNTIME_DIR" ] || return 1
   if [ ! -d "$AGENT_RUNTIME_DIR" ]; then
     mkdir -m 700 "$AGENT_RUNTIME_DIR" || return 1
   fi
   chmod 700 "$AGENT_RUNTIME_DIR" || return 1
-  agent_private_dir "$AGENT_RUNTIME_DIR" || return 1
+  owned_dir_valid "$AGENT_RUNTIME_DIR" "$(id -u)" 700 500 || return 1
   if [ -e "$AGENTSTATEFILE" ]; then
     [ -f "$AGENTSTATEFILE" ] && [ ! -L "$AGENTSTATEFILE" ] || return 1
     [ "$(stat -f %u "$AGENTSTATEFILE" 2>/dev/null)" = "$(id -u)" ] || return 1
@@ -277,7 +272,7 @@ agents_refresh() {
   [ -x "$AGENT_SCAN_CMD" ] || { rm -f "$AGENTSTATEFILE"; return 1; }
   mkdir -p "$AGENTS_DIR"
   chmod 700 "$AGENTS_DIR" 2>/dev/null || true
-  agent_private_dir "$AGENTS_DIR" || return 1
+  owned_dir_valid "$AGENTS_DIR" "$(id -u)" 700 500 || return 1
   record_count=$(find "$AGENTS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -n '1,513p' | wc -l | tr -d ' ')
   tmp=$(/usr/bin/mktemp "$AGENTSTATEFILE.XXXXXX") || return 1
   chmod 600 "$tmp"
@@ -356,36 +351,36 @@ agents_ensure_cache() {
   agents_cache_current || agents_refresh
 }
 
+# Count an already-selected snapshot. Cache acquisition remains the caller's
+# policy: human summaries may scan, machine power status must never do so.
+agents_tally() {
+  local provider session state age
+  cw=0; cwait=0; cq=0; cf=0; cfail=0; xw=0; xwait=0; xq=0; xf=0; xfail=0
+  [ -n "${1:-}" ] && [ -f "$1" ] || return 0
+  while IFS=$'\t' read -r provider session state age; do
+    agent_valid_age "$age" || continue
+    case "$provider:$state" in
+      claude:working) cw=$((cw + 1)) ;; claude:waiting) cwait=$((cwait + 1)) ;;
+      claude:quiet) cq=$((cq + 1)) ;; claude:finished) cf=$((cf + 1)) ;; claude:failed) cfail=$((cfail + 1)) ;;
+      codex:working) xw=$((xw + 1)) ;; codex:waiting) xwait=$((xwait + 1)) ;;
+      codex:quiet) xq=$((xq + 1)) ;; codex:finished) xf=$((xf + 1)) ;; codex:failed) xfail=$((xfail + 1)) ;;
+    esac
+  done < "$1"
+}
+
 agents_summary() {
-  local provider state session age cw=0 cwait=0 cq=0 cf=0 cfail=0 xw=0 xwait=0 xq=0 xf=0 xfail=0
-  if agents_ensure_cache && [ -f "$AGENTSTATEFILE" ]; then
-    while IFS=$'\t' read -r provider session state age; do
-      agent_valid_age "$age" || continue
-      case "$provider:$state" in
-        claude:working) cw=$((cw + 1)) ;; claude:waiting) cwait=$((cwait + 1)) ;;
-        claude:quiet) cq=$((cq + 1)) ;; claude:finished) cf=$((cf + 1)) ;; claude:failed) cfail=$((cfail + 1)) ;;
-        codex:working) xw=$((xw + 1)) ;; codex:waiting) xwait=$((xwait + 1)) ;;
-        codex:quiet) xq=$((xq + 1)) ;; codex:finished) xf=$((xf + 1)) ;; codex:failed) xfail=$((xfail + 1)) ;;
-      esac
-    done < "$AGENTSTATEFILE"
-  fi
+  local snapshot="" cw cwait cq cf cfail xw xwait xq xf xfail
+  if agents_ensure_cache; then snapshot=$AGENTSTATEFILE; fi
+  agents_tally "$snapshot"
   echo "Claude Code: $cw working · $cwait waiting · $cq quiet · $cf finished · $cfail failed"
   echo "Codex: $xw working · $xwait waiting · $xq quiet · $xf finished · $xfail failed"
   echo "All agents: $((cw + xw)) working · $((cwait + xwait)) waiting · $((cq + xq)) quiet · $((cf + xf)) finished · $((cfail + xfail)) failed"
 }
 
 agents_json() {
-  local provider state session age cw=0 cwait=0 cq=0 cf=0 cfail=0 xw=0 xwait=0 xq=0 xf=0 xfail=0
-  # Machine status never waits for optional transcript scanning.
-  if agents_cache_current && [ -f "$AGENTSTATEFILE" ]; then
-    while IFS=$'\t' read -r provider session state age; do
-      agent_valid_age "$age" || continue
-      case "$provider:$state" in
-        claude:working) cw=$((cw + 1)) ;; claude:waiting) cwait=$((cwait + 1)) ;; claude:quiet) cq=$((cq + 1)) ;; claude:finished) cf=$((cf + 1)) ;; claude:failed) cfail=$((cfail + 1)) ;;
-        codex:working) xw=$((xw + 1)) ;; codex:waiting) xwait=$((xwait + 1)) ;; codex:quiet) xq=$((xq + 1)) ;; codex:finished) xf=$((xf + 1)) ;; codex:failed) xfail=$((xfail + 1)) ;;
-      esac
-    done < "$AGENTSTATEFILE"
-  fi
+  local snapshot="" cw cwait cq cf cfail xw xwait xq xf xfail
+  if agents_cache_current; then snapshot=$AGENTSTATEFILE; fi
+  agents_tally "$snapshot"
   printf '{"claude":{"working":%s,"waiting":%s,"quiet":%s,"finished":%s,"failed":%s},"codex":{"working":%s,"waiting":%s,"quiet":%s,"finished":%s,"failed":%s}}' "$cw" "$cwait" "$cq" "$cf" "$cfail" "$xw" "$xwait" "$xq" "$xf" "$xfail"
 }
 

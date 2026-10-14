@@ -21,6 +21,19 @@ result=$(agents_json)
 [ "$(printf '%s' "$result" | /usr/bin/plutil -extract claude.quiet raw -o - -)" = 0 ]
 [ ! -e "$WORK/scanner-called" ]
 echo 'machine status reads cached observation without scanning: ok'
+# Both formats share counts, but only the human summary may acquire a cache.
+printf 'claude\ta\tworking\t0\ncodex\tb\tfailed\t2\nclaude\tc\twaiting\tbad\n' > "$AGENTSTATEFILE"
+result=$(agents_json)
+[ "$(printf '%s' "$result" | /usr/bin/plutil -extract claude.working raw -o - -)" = 1 ]
+[ "$(printf '%s' "$result" | /usr/bin/plutil -extract codex.failed raw -o - -)" = 1 ]
+[ "$(printf '%s' "$result" | /usr/bin/plutil -extract claude.waiting raw -o - -)" = 0 ]
+summary=$(agents_summary)
+[[ "$summary" == *'All agents: 1 working · 0 waiting · 0 quiet · 0 finished · 1 failed'* ]]
+touch -t 200001010000 "$AGENTSTATEFILE"
+agents_summary >/dev/null
+[ -e "$WORK/scanner-called" ]
+echo 'shared counts preserve formatter-specific cache acquisition: ok'
+
 
 AGENT_NOTIFY=0
 OBSERVATION_MAX_TICKS=1

@@ -1,15 +1,25 @@
 #!/bin/bash
 # Private state, process identity, locking, and owned-session primitives.
 
-path_uid() { stat -f %u "$1" 2>/dev/null || stat -c %u "$1" 2>/dev/null; }
-path_mode() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1" 2>/dev/null; }
-path_inode() { stat -f %i "$1" 2>/dev/null || stat -c %i "$1" 2>/dev/null; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/private-paths.sh"
+
+# Explicit allowlist shared by session writes and cleanup. Legacy names remain
+# readable; unexpected files and symlinks are never swept from the directory.
+SESSION_FIELDS=(id state started_at deadline duration_seconds battery_floor
+  recovery require_ac policy_version battery_start power_start notifications
+  heartbeat thermal-strikes warned_deadline recovery_verified_at
+  recovery_verified_session recovery_failed_at recovery_failed_session
+  guardian_session guardian_heartbeat guardian_wake enabling_pid enabling_start
+  last-alert active owned started enabling-pid)
+
+session_field_valid() {
+  local field
+  for field in "${SESSION_FIELDS[@]}"; do [ "$field" != "$1" ] || return 0; done
+  return 1
+}
 
 private_dir_valid() {
-  local dir=$1 owner mode
-  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  owner=$(path_uid "$dir") || return 1; mode=$(path_mode "$dir") || return 1
-  [ "$owner" = "$USER_ID" ] && [ "$mode" = 700 ]
+  owned_dir_valid "$1" "$USER_ID" 700
 }
 
 secure_dir() {
@@ -47,6 +57,7 @@ uint_normalize() {
   printf '%s' "$value"
 }
 valid_duration() { local value; value=$(uint_normalize "${1:-}") || return 1; [ "${#value}" -le 5 ] && [ "$value" -ge 1 ] && [ "$value" -le 21600 ]; }
+valid_session_duration() { [ "$(uint_normalize "${1:-}" 2>/dev/null)" = 0 ] || valid_duration "$1"; }
 valid_percent() { local value; value=$(uint_normalize "${1:-}") || return 1; [ "${#value}" -le 3 ] && [ "$value" -ge 1 ] && [ "$value" -le 100 ]; }
 valid_battery_percent() { local value; value=$(uint_normalize "${1:-}") || return 1; [ "${#value}" -le 3 ] && [ "$value" -ge 0 ] && [ "$value" -le 100 ]; }
 valid_epoch() { local value; value=$(uint_normalize "${1:-}") || return 1; [ "${#value}" -le 10 ]; }
@@ -56,6 +67,7 @@ valid_session_id() { case "${1:-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) retur
 write_field() {
   local dir=$1 field=$2 value=$3 tmp
   case "$field" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  if [ "$dir" = "${SESSION_DIR:-}" ]; then session_field_valid "$field" || return 1; fi
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
   secure_dir "$dir" || return 1
   tmp=$(mktemp "$dir/.$field.XXXXXX") || return 1
@@ -88,7 +100,7 @@ read_epoch() {
 config_duration() {
   local value
   value=$(read_field "$CONFIG_DIR" duration "$DEFAULT_DURATION")
-  if valid_duration "$value"; then value=$(uint_normalize "$value"); else value=21600; fi
+  if valid_session_duration "$value"; then value=$(uint_normalize "$value"); else value=21600; fi
   printf '%s' "$value"
 }
 
@@ -263,8 +275,7 @@ recovery_lock_allowed() {
   session_owned || return 1
   if modern_session_owned && ! session_valid; then return 0; fi
   now=$(date +%s); state=$(read_field "$SESSION_DIR" state); deadline=$(read_uint "$SESSION_DIR" deadline 0)
-  [ "$deadline" -gt 0 ] || return 0
-  [ "$now" -ge "$deadline" ] && return 0
+  if [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; then return 0; fi
   if [ "$state" = enabling ]; then
     started=$(read_uint "$SESSION_DIR" started_at 0); age=$((now-started))
     [ "$started" -eq 0 ] || [ "$age" -lt 0 ] || [ "$age" -ge "$ACTIVATION_GRACE" ]
@@ -372,7 +383,7 @@ session_valid() {
   recovery=$(read_field "$SESSION_DIR" recovery); notifications=$(read_field "$SESSION_DIR" notifications)
   require_ac=$(read_field "$SESSION_DIR" require_ac 0); policy_version=$(read_field "$SESSION_DIR" policy_version 1)
   valid_session_id "$id" && case "$state" in enabling|active) true ;; *) false ;; esac &&
-    valid_epoch "$started" && valid_epoch "$deadline" && valid_duration "$duration" || return 1
+    valid_epoch "$started" && valid_epoch "$deadline" && valid_session_duration "$duration" || return 1
   started=$(uint_normalize "$started"); deadline=$(uint_normalize "$deadline"); duration=$(uint_normalize "$duration")
   floor=$(uint_normalize "$floor" 2>/dev/null) || return 1
   recovery=$(uint_normalize "$recovery" 2>/dev/null) || return 1
@@ -380,7 +391,8 @@ session_valid() {
   require_ac=$(uint_normalize "$require_ac" 2>/dev/null) || return 1
   policy_version=$(uint_normalize "$policy_version" 2>/dev/null) || return 1
   elapsed=$((deadline - started))
-  [ "$elapsed" -ge 1 ] && [ "$elapsed" -le 21600 ] && valid_percent "$floor" &&
+  { { [ "$duration" -eq 0 ] && [ "$deadline" -eq 0 ]; } ||
+    { [ "$duration" -gt 0 ] && [ "$elapsed" -ge 1 ] && [ "$elapsed" -le 21600 ]; }; } && valid_percent "$floor" &&
     valid_bool "$recovery" && valid_bool "$notifications" && valid_bool "$require_ac" &&
     case "$policy_version" in 1|2) true ;; *) false ;; esac
 }
@@ -390,10 +402,11 @@ session_owned() { modern_session_owned || legacy_session_valid || legacy_enablin
 session_claim_current() { [ "$(current_session_id)" = "$1" ] && modern_session_owned && [ "$(read_field "$SESSION_DIR" state)" = enabling ]; }
 
 session_claim() {
-  local id=$1 now=$2 duration=$3 start battery_start=${4:--} power_start=${5:--}
+  local id=$1 now=$2 duration=$3 start deadline=0 battery_start=${4:--} power_start=${5:--}
+  [ "$duration" -eq 0 ] || deadline=$((now + duration))
   state_init || return 1; start=$(process_start_identity $$)
   write_field "$SESSION_DIR" id "$id" && write_field "$SESSION_DIR" state enabling &&
-    write_field "$SESSION_DIR" started_at "$now" && write_field "$SESSION_DIR" deadline "$((now + duration))" &&
+    write_field "$SESSION_DIR" started_at "$now" && write_field "$SESSION_DIR" deadline "$deadline" &&
     write_field "$SESSION_DIR" duration_seconds "$duration" && write_field "$SESSION_DIR" battery_floor "$BATTERY_FLOOR" &&
     write_field "$SESSION_DIR" require_ac "$REQUIRE_AC" && write_field "$SESSION_DIR" policy_version 2 &&
     write_field "$SESSION_DIR" battery_start "$battery_start" && write_field "$SESSION_DIR" power_start "$power_start" &&
@@ -427,16 +440,10 @@ session_extend_deadline() {
 }
 
 session_clear() {
+  local field paths=()
   secure_dir "$SESSION_DIR" || return 1
-  rm -f "$SESSION_DIR/id" "$SESSION_DIR/state" "$SESSION_DIR/started_at" "$SESSION_DIR/deadline" \
-    "$SESSION_DIR/duration_seconds" "$SESSION_DIR/battery_floor" "$SESSION_DIR/recovery" \
-    "$SESSION_DIR/require_ac" "$SESSION_DIR/policy_version" "$SESSION_DIR/battery_start" "$SESSION_DIR/power_start" \
-    "$SESSION_DIR/notifications" "$SESSION_DIR/heartbeat" "$SESSION_DIR/thermal-strikes" "$SESSION_DIR/warned_deadline" \
-    "$SESSION_DIR/recovery_verified_at" "$SESSION_DIR/recovery_verified_session" \
-    "$SESSION_DIR/recovery_failed_at" "$SESSION_DIR/recovery_failed_session" \
-    "$SESSION_DIR/guardian_session" "$SESSION_DIR/guardian_heartbeat" \
-    "$SESSION_DIR/enabling_pid" "$SESSION_DIR/enabling_start" \
-    "$SESSION_DIR/last-alert" "$SESSION_DIR/active" "$SESSION_DIR/owned" "$SESSION_DIR/started"
+  for field in "${SESSION_FIELDS[@]}"; do paths+=("$SESSION_DIR/$field"); done
+  rm -f -- "${paths[@]}"
 }
 
 session_enabler_alive() {

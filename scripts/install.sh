@@ -78,7 +78,7 @@ echo 'Checking the app and its required helpers…'
 for file in Contents/MacOS/Lidwise Contents/Resources/lidwise Contents/Resources/lidwise-agent-scan Contents/Helpers/lidwise-thermal Contents/Helpers/lidwise-agent-scan-core Contents/Helpers/lidwise-lid-probe; do
   [ -x "$WORK/new.app/$file" ] || { echo "Incomplete app: $file" >&2; exit 1; }
 done
-for module in session network observation history; do
+for module in session network observation history guardian private-paths; do
   [ -f "$WORK/new.app/Contents/Resources/lib/lidwise/$module.sh" ] || { echo "Missing helper module: $module" >&2; exit 1; }
 done
 /usr/bin/codesign --verify --deep --strict "$WORK/new.app"

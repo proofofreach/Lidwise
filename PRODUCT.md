@@ -3,12 +3,12 @@
 ## Audience and job
 
 Lidwise serves MacBook users running long local work: coding agents, builds,
-transfers and registered jobs. They choose one bounded period during which the
+transfers and registered jobs. They choose a timed session or Full On with no timer. The
 Mac should remain awake with its lid closed on a hard, ventilated surface.
 
 ## Product promise
 
-Keep your Mac awake for a session you control, with a clear deadline and visible
+Keep your Mac awake for a session you control, with a clear duration mode and visible
 sleep restoration. Report observed state and capability. Never infer successful
 restoration from a requested action, job completion from inactivity, or thermal
 safety from software checks.
@@ -16,8 +16,8 @@ safety from software checks.
 ## Accepted behavior
 
 - One manually owned session shared by the native menu app and CLI.
-- Maximum six hours from original session start; repeated on commands do not
-  extend it. An explicit extension changes a still-active session within that cap.
+- Timed sessions have a maximum six hours from original session start; repeated on commands do not
+  extend it. An explicit extension changes a still-active session within that cap. Full On has no deadline and runs until turned off or a safety cutoff.
 - Battery, charging and thermal policy can end a session before its deadline.
 - Optional agent activity and hook signals report work; they do not own sleep.
 - An external power hold remains external. Unknown state remains unknown.

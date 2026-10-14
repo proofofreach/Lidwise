@@ -2,7 +2,7 @@
 
 ## Product intent
 
-Lidwise is a macOS menu bar utility for a manual, time-bounded awake session. It serves people who leave long local jobs running while a MacBook lid is closed. The app reports verified helper state. Agent and goal data is observation only.
+Lidwise is a macOS menu bar utility for a manual awake session, timed or Full On. It serves people who leave long local jobs running while a MacBook lid is closed. The app reports verified helper state. Agent and goal data is observation only.
 
 ## Accepted identity
 
@@ -32,7 +32,7 @@ Lidwise is a macOS menu bar utility for a manual, time-bounded awake session. It
 ## State language
 
 - **Off:** normal macOS sleep applies.
-- **On:** show the verified end clock and remaining time.
+- **On:** show the verified end clock and remaining time, or **Full On · no timer**.
 - **External hold:** another tool is preventing sleep; leave it unchanged.
 - **Unknown:** disable the main control and offer **Check setup**.
 - **Pending:** disable changing controls and name the operation in progress.
@@ -42,7 +42,7 @@ Never use “Protected” as a result of a click. “Recovery ready” is permit
 
 ## Interaction rules
 
-- Session durations are fixed at 30 minutes, 1 hour, 2 hours, and 6 hours.
+- Session durations are fixed at 30 minutes, 1 hour, 2 hours, 6 hours, and **Full On** (no timer).
 - Changing duration while a session runs changes the next session. It does not extend the current deadline.
 - Show **Add 30 minutes** only while the helper reports that the owned session can be extended. Keep the six-hour total cap visible in the action detail.
 - Battery floor and AC requirements apply to the next session. Keep them in Settings and continue to show the active session's actual policy in the status card.
@@ -51,7 +51,7 @@ Never use “Protected” as a result of a click. “Recovery ready” is permit
 - Agent integration setup is optional. Show helper-reported provider support, current setup, and an exact configuration preview before installation. Never imply that a provider supports signals it does not report.
 - **Test closed-lid behavior** opens a separate, non-modal window. Explain the ventilated-surface procedure, keep the menu controls usable, show progress, and provide a selectable, copyable result. An inconclusive measurement is not a pass or failure.
 - **Network monitoring** controls read-only probes. It does not promise automatic repair or change network settings.
-- **Quit menu bar app** leaves an owned manual session running to its deadline.
+- **Quit menu bar app** leaves an owned manual session running until its deadline or, for Full On, until explicitly stopped or a safety cutoff.
 - **Turn off and quit** first verifies normal sleep restoration. It stays disabled when no app-owned session is active.
 - Login launch and session-at-login form one dependency. Session-at-login is unavailable until menu bar launch is enabled.
 

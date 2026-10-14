@@ -42,7 +42,7 @@ cp "$CLA_SOURCE_APP/Contents/Resources/lidwise" "$CLA_SOURCE_APP/Contents/Resour
 echo '# module' > "$CLA_SOURCE_APP/Contents/Resources/lib/lidwise/network.sh"
 echo '# module' > "$CLA_SOURCE_APP/Contents/Resources/lib/lidwise/session.sh"
 echo '# module' > "$CLA_SOURCE_APP/Contents/Resources/lib/lidwise/observation.sh"
-echo '# module' > "$CLA_SOURCE_APP/Contents/Resources/lib/lidwise/history.sh"
+for module in history guardian private-paths; do echo '# module' > "$CLA_SOURCE_APP/Contents/Resources/lib/lidwise/$module.sh"; done
 cat > "$CLA_SUDO" <<'SUDO'
 #!/bin/bash
 set -e
@@ -103,12 +103,14 @@ if "$ROOT/scripts/install.sh" > "$WORK/output" 2>&1; then exit 1; fi
 grep -q 'Incomplete app: Contents/Helpers/lidwise-agent-scan-core' "$WORK/output"
 [ -f "$APP/prior-marker" ]
 mv "$WORK/scanner" "$CLA_SOURCE_APP/Contents/Helpers/lidwise-agent-scan-core"
-# A missing history module cannot leave an installed CLI that fails at startup.
-mv "$CLA_SOURCE_APP/Contents/Resources/lib/lidwise/history.sh" "$WORK/history.sh"
-if "$ROOT/scripts/install.sh" > "$WORK/output" 2>&1; then exit 1; fi
-grep -q 'Missing helper module: history' "$WORK/output"
-[ -f "$APP/prior-marker" ]
-mv "$WORK/history.sh" "$CLA_SOURCE_APP/Contents/Resources/lib/lidwise/history.sh"
+# Every required library is checked before replacing an installed app.
+for module in history guardian private-paths; do
+  mv "$CLA_SOURCE_APP/Contents/Resources/lib/lidwise/$module.sh" "$WORK/$module.sh"
+  if "$ROOT/scripts/install.sh" > "$WORK/output" 2>&1; then exit 1; fi
+  grep -q "Missing helper module: $module" "$WORK/output"
+  [ -f "$APP/prior-marker" ]
+  mv "$WORK/$module.sh" "$CLA_SOURCE_APP/Contents/Resources/lib/lidwise/$module.sh"
+done
 # If restoration itself fails, retain backups and report the incomplete rollback.
 touch "$WORK/bootstrap-always-fails"
 if "$ROOT/scripts/install.sh" > "$WORK/output" 2>&1; then exit 1; fi

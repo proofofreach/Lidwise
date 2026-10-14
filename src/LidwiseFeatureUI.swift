@@ -463,7 +463,7 @@ enum SessionText {
         return """
         Started: \(date(session.startedAt))
         \(endedLabel): \(date(session.endedAt))
-        Scheduled deadline: \(date(session.deadline))
+        Scheduled deadline: \(session.deadline == 0 ? "None (Full On)" : date(session.deadline))
         End reason: \(reason(session.reason))
         Sleep restoration: \(session.restoration.rawValue.capitalized)
         Starting power: \(power(session.powerStart, battery: session.batteryStart))

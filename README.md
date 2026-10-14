@@ -2,7 +2,7 @@
 
 ![Lidwise — Close the lid. Keep going.](assets/lidwise-hero.png)
 
-Keep your Mac awake for a bounded session you control.
+Keep your Mac awake for a timed session or Full On with no timer.
 
 Previously named **Closed-Lid Awake**. Upgrading installs `Lidwise.app` and the
 `lidwise` CLI, updates existing login paths, and retains an existing `vibecaf`
@@ -11,7 +11,7 @@ recovery job identifiers keep their original names so upgrades preserve ownershi
 and recovery. Historical screenshots and hardware records describe earlier builds.
 
 A native menu-bar app and CLI for manual closed-lid work, with a battery floor,
-thermal checks, a deadline, and independent sleep restoration. Optional local
+thermal checks, an optional deadline, and independent sleep restoration. Optional local
 activity monitoring shows Claude Code, Codex, and registered jobs. Activity does
 not decide when your Mac sleeps.
 
@@ -31,7 +31,7 @@ Earlier installation and hardware results do not certify these additions.
 ## Daily use
 
 1. Open **Lidwise** and use **Check setup**.
-2. Choose a duration and turn awake mode on. Wait for verified status.
+2. Choose a duration or **Full On** (no timer), then turn awake mode on. Wait for verified status.
 3. Close the lid only when the app reports an owned session with recovery ready.
 4. Turn it off when finished. The deadline, battery floor, or thermal policy can
    end the session earlier.
@@ -40,7 +40,12 @@ The primary control and global shortcut operate the same session. Repeated
 `on` calls do not extend its deadline. An external sleep hold is shown separately
 and remains under the other tool's control.
 
-The app warns in the final five minutes. **Add 30 minutes** extends an eligible
+**Full On** has no timer. It stays awake until you turn it off or a battery,
+AC-only, thermal, or recovery cutoff ends the session. Choose it before starting
+a session; changing the selector during a session affects the next session.
+The CLI equivalent is `lidwise on --for 0`.
+
+For timed sessions, the app warns in the final five minutes. **Add 30 minutes** extends an eligible
 session within the six-hour total limit. Settings can save a battery floor and
 an AC-only requirement for the next session. Session history explains why a
 session stopped and whether normal sleep was verified. The guided lid test
