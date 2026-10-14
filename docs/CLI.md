@@ -4,7 +4,8 @@ The app and `lidwise` share one manually owned session.
 
 | Command | Behavior |
 |---|---|
-| `lidwise on` | Start using the saved duration, up to six hours. |
+| `lidwise on` | Start using the saved duration or Full On (no timer). |
+| `lidwise on --for 0` | Start Full On with no timer. Battery, AC, thermal, and recovery cutoffs still apply. |
 | `lidwise on --for 1800` | Start a 30-minute session. Existing sessions keep their deadline. |
 | `lidwise extend --by 1800` | Explicitly add 30 minutes to an owned, unexpired session, within six hours of its original start. |
 | `lidwise off` | Restore sleep for this app's session, with readback verification. |
@@ -13,6 +14,7 @@ The app and `lidwise` share one manually owned session.
 | `lidwise status --json` | Versioned status; `off`, `owned-on`, `external-on`, or `unknown`. |
 | `lidwise doctor` | Read-only setup diagnostics. |
 | `lidwise config get --json` | Read saved settings. |
+| `lidwise config set duration 0` | Default future sessions to Full On (no timer). |
 | `lidwise config set duration 3600` | Default future sessions to one hour. |
 | `lidwise config set recovery off` | Disable network monitoring. Compatibility key; no automatic network writes. |
 | `lidwise config set notifications on` | Opt in to agent notifications. |
