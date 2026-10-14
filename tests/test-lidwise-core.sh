@@ -128,12 +128,14 @@ config=$($VIBECAF config get --json)
 [ "$config" = '{"schema_version":1,"duration_seconds":90,"battery_floor":20,"require_ac":false,"network_recovery":false,"agent_notifications":true}' ]
 [ "$(stat -f %Lp "$VIBECAF_STATE_DIR/config")" = 700 ]
 [ "$(stat -f %Lp "$VIBECAF_STATE_DIR/config/duration")" = 600 ]
-! $VIBECAF config set duration 0 >/dev/null 2>&1
+$VIBECAF config set duration 0 >/dev/null
+[ "$($VIBECAF config get --json | /usr/bin/plutil -extract duration_seconds raw -o - -)" = 0 ]
+$VIBECAF config set duration 90 >/dev/null
 ! $VIBECAF config set duration 21601 >/dev/null 2>&1
 ! $VIBECAF config set duration 999999999999999999999999 >/dev/null 2>&1
 ! $VIBECAF config set duration nope >/dev/null 2>&1
 ! $VIBECAF config set recovery maybe >/dev/null 2>&1
-! $VIBECAF on --for 0 >/dev/null 2>&1
+! $VIBECAF on --for 21601 >/dev/null 2>&1
 
 # Refuse mutation when the OS lock utility lacks file-descriptor mode.
 cat > "$TEST_ROOT/bin/lockf-unsupported" <<'MOCK'
