@@ -8,8 +8,10 @@ owned_dir_valid() {
   local dir=$1 expected_owner=$2 mode allowed
   shift 2
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  [ "$(path_uid "$dir")" = "$expected_owner" ] || return 1
-  mode=$(path_mode "$dir") || return 1
+  # One stat for owner and mode: this check runs on every state read.
+  mode=$(stat -f '%u %Lp' "$dir" 2>/dev/null || stat -c '%u %a' "$dir" 2>/dev/null) || return 1
+  [ "${mode%% *}" = "$expected_owner" ] || return 1
+  mode=${mode##* }
   for allowed in "$@"; do [ "$mode" != "$allowed" ] || return 0; done
   return 1
 }

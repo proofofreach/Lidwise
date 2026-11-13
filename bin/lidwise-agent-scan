@@ -210,7 +210,11 @@ scan_provider() {  # scan_provider <provider> <root>
       found=1
       mark_emitted "$provider" "$session_id"
       printf '%s\t%s\t%s\t%s\n' "$provider" "$session" "$state" "$age"
-    done < <(find "$root" -type f -name '*.jsonl' -mmin "-$RECENT_MINUTES" -print 2>/dev/null | sort | tail -n "$SCAN_MAX")
+    # Exclude child transcripts before the bound, and keep the most recently
+    # modified files: many subagent files must not evict main sessions.
+    done < <(find "$root" -type f -name '*.jsonl' -mmin "-$RECENT_MINUTES" \
+      ! -path '*/subagent/*' ! -path '*/subagents/*' ! -path '*/children/*' ! -name 'subagent-*' \
+      -exec stat -f '%m%t%N' {} + 2>/dev/null | sort -n | tail -n "$SCAN_MAX" | cut -f2-)
   fi
 
   if [ "$provider" = claude ]; then CLAUDE_FOUND=$found; else CODEX_FOUND=$found; fi

@@ -340,6 +340,11 @@ final class ResizingCardHost<Content: View>: NSHostingView<Content> {
             // to recompute its fitting size before changing the menu item frame.
             DispatchQueue.main.async {
                 guard let self else { return }
+                // Apply the pending SwiftUI update first; otherwise fittingSize
+                // can still describe the previous state and the row lags one
+                // change behind (a new long fault stays clipped).
+                self.invalidateIntrinsicContentSize()
+                self.layoutSubtreeIfNeeded()
                 let size = self.fittingSize
                 if abs(self.frame.height - size.height) > 0.5 || abs(self.frame.width - size.width) > 0.5 {
                     self.setFrameSize(size)
@@ -836,6 +841,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         menu.delegate = self
+        installEditMenu()
         // The panel is dark by design; the menu chrome around it must be too,
         // or the rounded panel floats on a light frosted slab in light mode.
         menu.appearance = NSAppearance(named: .darkAqua)
@@ -1491,22 +1497,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // A menu-bar-only app has no visible main menu, but AppKit still routes
+    // key equivalents through NSApp.mainMenu. Without an Edit menu, ⌘C, ⌘V,
+    // ⌘A and ⌘X do nothing in any dialog, text view or field.
+    func installEditMenu() {
+        let main = NSMenu()
+        let editItem = NSMenuItem()
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        main.addItem(editItem)
+        NSApp.mainMenu = main
+    }
+
     func showDiagnostics(_ text: String) {
+        let body = text.isEmpty ? "No diagnostic output was returned." : text
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: 260))
         let textView = NSTextView(frame: scroll.bounds)
         textView.isEditable = false
         textView.isSelectable = true
+        textView.autoresizingMask = [.width]
         textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        textView.string = text.isEmpty ? "No diagnostic output was returned." : text
+        textView.string = body
         scroll.documentView = textView
         scroll.hasVerticalScroller = true
         let alert = NSAlert()
         alert.messageText = "Setup diagnostics"
-        alert.informativeText = "This check is read-only. Select the text to copy it."
+        alert.informativeText = "This check is read-only. Copy the report to share it."
         alert.accessoryView = scroll
         alert.addButton(withTitle: "Done")
+        alert.addButton(withTitle: "Copy to Clipboard")
         NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
+        alert.window.initialFirstResponder = textView
+        if alert.runModal() == .alertSecondButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(body, forType: .string)
+            showHUD(text: "Diagnostics copied", symbol: "doc.on.clipboard")
+        }
     }
 
     @objc func openNetLog() {

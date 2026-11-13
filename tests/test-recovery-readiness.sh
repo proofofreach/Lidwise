@@ -58,6 +58,20 @@ if guardian_wait_for_session fixture 1; then echo 'FAIL: accepted stale heartbea
 )
 echo 'PASS: bounded guardian acknowledgement validates identity and freshness'
 
+# The doorbell ends an idle step early, and an unusable doorbell falls back to
+# sleep instead of spinning.
+(
+  RUNTIME_DIR="$WORK/runtime"; mkdir -m 700 "$RUNTIME_DIR"
+  guardian_doorbell_open
+  [ "$GUARDIAN_DOORBELL_FD_OPEN" = 1 ] && [ -p "$RUNTIME_DIR/guardian.doorbell" ]
+  now_ms() { perl -MTime::HiRes=time -e 'printf "%d", time * 1000'; }
+  guardian_ring; before=$(now_ms); guardian_pause
+  [ $(( $(now_ms) - before )) -lt 500 ] || { echo 'FAIL: ring did not end the wait'; exit 1; }
+  exec 7<&-; slept=0; sleep() { slept=1; }
+  guardian_pause; [ "$slept" = 1 ] && [ "$GUARDIAN_DOORBELL_FD_OPEN" = 0 ] || { echo 'FAIL: broken doorbell did not fall back'; exit 1; }
+)
+echo 'PASS: guardian doorbell wakes early and never spins'
+
 # One allowlist controls writes and cleanup; unknown files/links survive.
 for field in "${SESSION_FIELDS[@]}"; do write_field "$SESSION_DIR" "$field" fixture; done
 printf 'keep\n' > "$WORK/target"

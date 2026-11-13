@@ -2,6 +2,32 @@
 
 ## 1.2.0 — unreleased community candidate
 
+- Turning on is about twice as fast. The guardian wakes on a private doorbell
+  instead of a one-second poll, and session writes and status reads spawn far
+  fewer processes.
+- Fix false "Crash recovery failed" alerts. The guardian now re-checks a
+  recovery reason under the session lock. It recovers an interrupted
+  activation at once, and it no longer marks a healthy session unverified
+  after a race with activation.
+- `on` replaces an expired or malformed session instead of reporting it as on.
+  The guard enforces the deadline on time, and the guard and observer exit
+  with their session.
+- Repair state directories and history files that lost their private mode.
+  Before, they silently reset settings to defaults and erased history.
+- Goals: store activity files as absolute paths, keep monitoring options on
+  restart, treat other users' processes as alive, and reject values that
+  would not read back.
+- Agents: expire legacy records, publish the scan before bookkeeping, keep
+  main sessions ahead of subagent files, and replace hooks installed from a
+  moved copy of the app.
+- The menu card grows at once for a new long error.
+- Private state now lives in `~/Library/Application Support/Lidwise`. The
+  installer moves an existing `Closed-Lid Awake` folder there once, while
+  sleep is verified normal and the session lock is held. Until then, every
+  process keeps using the old folder. The guardian follows the move without a
+  restart. `lidwise doctor` names any unused old folder.
+- See `docs/STATE_MACHINES.md` for the state machines and invariants.
+
 - Enforce the battery floor on AC as well as battery power, including activation.
   A connected charger no longer bypasses low-battery protection.
 

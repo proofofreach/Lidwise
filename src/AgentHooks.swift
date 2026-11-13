@@ -156,6 +156,16 @@ private func own(_ value: Any, _ prefix: String) -> Bool {
   guard let h = value as? [String: Any], let c = h["command"] as? String else { return false }
   return c.hasPrefix(prefix + " ")
 }
+// A Lidwise hook installed from any copy of the app (a moved, translocated, or
+// replaced bundle). Install and remove replace these too, so a path change can
+// never strand hooks or duplicate them. Status still requires the current path.
+private let lidwiseHookPattern = try! NSRegularExpression(
+  pattern: "^'(?:[^']|'\"'\"')*/(?:lidwise|vibecaf)-agent-scan' --hooks hook claude (?:user-prompt|notification|stop|stop-failure)$")
+private func ownAnyCopy(_ value: Any, _ prefix: String) -> Bool {
+  if own(value, prefix) { return true }
+  guard let h = value as? [String: Any], let c = h["command"] as? String else { return false }
+  return lidwiseHookPattern.firstMatch(in: c, range: NSRange(c.startIndex..., in: c)) != nil
+}
 private func ownedHookCount(_ input: [String: Any], _ prefix: String) -> Int {
   guard let hooks = input["hooks"] as? [String: Any] else { return 0 }
   return managedEvents.reduce(0) { count, event in
@@ -189,7 +199,7 @@ private func transformed(_ input: [String: Any], _ prefix: String, _ install: Bo
     hooks[event] = groups.compactMap { group in
       guard let hs = group["hooks"] as? [Any] else { return group }
       var g = group
-      let kept = hs.filter { !own($0, prefix) }
+      let kept = hs.filter { !ownAnyCopy($0, prefix) }
       if kept.isEmpty { return nil }
       g["hooks"] = kept
       return g

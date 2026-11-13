@@ -16,7 +16,7 @@ fi
 # The candidate helper holds the shared mutation lock throughout staging/upgrade.
 # The script child only reads power state; it never invokes a mutating CLI command.
 if [ "${CLA_MAINTENANCE_ACTIVE:-0}" != 1 ]; then
-  exec "$SOURCE_APP/Contents/Resources/lidwise" __maintenance -- \
+  exec "$SOURCE_APP/Contents/Resources/lidwise" __maintenance --migrate-state -- \
     /usr/bin/env CLA_MAINTENANCE_ACTIVE=1 /bin/bash "$0" "$@"
 fi
 helper=$(installed_helper || true)

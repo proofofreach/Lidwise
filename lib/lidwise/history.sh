@@ -16,6 +16,9 @@ history_file_readable() {
   [ -f "$HISTORY_FILE" ] && [ ! -L "$HISTORY_FILE" ] || return 1
   owner=$(path_uid "$HISTORY_FILE") || return 1
   mode=$(path_mode "$HISTORY_FILE") || return 1
+  # Repair a mode change on the user's own file rather than hiding history
+  # (and then replacing it with a one-row file at the next session end).
+  if [ "$owner" = "$USER_ID" ] && [ "$mode" != 600 ] && chmod 600 "$HISTORY_FILE" 2>/dev/null; then mode=600; fi
   size=$(stat -f %z "$HISTORY_FILE" 2>/dev/null || stat -c %s "$HISTORY_FILE" 2>/dev/null) || return 1
   [ "$owner" = "$USER_ID" ] && [ "$mode" = 600 ] && [ "$size" -le "$HISTORY_MAX_BYTES" ]
 }
@@ -47,6 +50,14 @@ history_upsert() {
     "$id" "$started" "$ended" "$deadline" "$reason" "$restoration" "$battery_start" "$battery_end" "$power_start" "$power_end" > "$tmp" || {
       rm -f "$tmp"; return 1;
     }
+  # Never silently replace a history file that exists but cannot be read. An
+  # oversized file of the user's own is kept aside; a symlink or foreign file
+  # is left alone and the record is skipped (history is diagnostic only).
+  if { [ -e "$HISTORY_FILE" ] || [ -L "$HISTORY_FILE" ]; } && ! history_file_readable; then
+    if [ -f "$HISTORY_FILE" ] && [ ! -L "$HISTORY_FILE" ] && [ "$(path_uid "$HISTORY_FILE")" = "$USER_ID" ]; then
+      mv -f "$HISTORY_FILE" "$HISTORY_FILE.unreadable" || { rm -f "$tmp"; return 1; }
+    else rm -f "$tmp"; return 1; fi
+  fi
   if history_file_readable; then
     while [ "$scanned" -lt "$HISTORY_MAX_SCAN_ROWS" ] &&
       IFS=$'\t' read -r old_id old_started old_ended old_deadline old_reason old_restoration old_battery_start old_battery_end old_power_start old_power_end extra; do

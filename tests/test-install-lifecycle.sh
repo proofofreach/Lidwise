@@ -7,6 +7,12 @@ trap 'rm -rf "$WORK"' EXIT
 export CLA_INSTALL_HOME="$WORK/home" CLA_DAEMON_DIR="$WORK/daemons" CLA_SUDOERS_DIR="$WORK/rules"
 export CLA_SOURCE_APP="$WORK/source.app" CLA_SUDO="$WORK/sudo" CLA_LAUNCHCTL="$WORK/launchctl" CLA_PMSET="$WORK/pmset"
 export FIXTURE="$WORK"
+# uninstall.sh can fall back to this checkout's real bin/lidwise as its
+# maintenance helper. Sandbox that CLI too: without this, the test ran
+# `__maintenance --remove` against the developer's real session and power.
+export VIBECAF_STATE_DIR="$WORK/lidwise-state" VIBECAF_RUNTIME_DIR="$WORK/lidwise-run"
+export VIBECAF_PMSET="$WORK/pmset" VIBECAF_SUDO="$WORK/sudo" VIBECAF_LAUNCHCTL="$WORK/launchctl"
+export VIBECAF_OSASCRIPT=/usr/bin/false VIBECAF_CAFFEINATE=/usr/bin/false VIBECAF_NONINTERACTIVE=1
 mkdir -p "$CLA_SOURCE_APP/Contents/"{MacOS,Resources/lib/lidwise,Helpers} "$CLA_DAEMON_DIR" "$CLA_SUDOERS_DIR" "$WORK/jobs"
 cp /usr/bin/true "$CLA_SOURCE_APP/Contents/MacOS/Lidwise"
 cp /usr/bin/true "$CLA_SOURCE_APP/Contents/Helpers/lidwise-thermal"

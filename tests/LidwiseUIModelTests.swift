@@ -327,7 +327,18 @@ struct LidwiseUIModelTests {
         check(runner.arguments.allSatisfy { $0 == ["__observation_once"] }, "activity worker must never send power mutations")
     }
 
+    // A malformed diagnostic history record must not hide the live power phase.
+    static func testMalformedLastSessionKeepsPhase() {
+        do {
+            let state = try StatusParser.parse(statusJSON(phase: "owned-on",
+                extra: #","last_session":{"session_id":"x","started_at":"bad"}"#))
+            check(state.phase == .ownedOn, "malformed last_session must not make the phase unknown")
+            check(state.lastSession == nil, "malformed last_session must be dropped")
+        } catch { check(false, "malformed last_session must not fail status parsing: \(error)") }
+    }
+
     static func main() {
+        testMalformedLastSessionKeepsPhase()
         testStatusParsing()
         testFeaturePayloads()
         testProcessResults()

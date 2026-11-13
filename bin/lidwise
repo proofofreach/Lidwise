@@ -23,9 +23,22 @@ else OBSERVATION_RUNNER="$SELF_DIR/../.build/helpers/lidwise-agent-scan-core"; f
 
 USER_ID=$(id -u)
 RUNTIME_DIR=${VIBECAF_RUNTIME_DIR:-"/tmp/vibecaf.$USER_ID"}
-STATE_DIR=${VIBECAF_STATE_DIR:-"$HOME/Library/Application Support/Closed-Lid Awake"}
-SESSION_DIR="$STATE_DIR/session"; CONFIG_DIR="$STATE_DIR/config"; GOALS_DIR="$STATE_DIR/goals"; AGENTS_DIR="$STATE_DIR/agents"
-LOG_DIR="$STATE_DIR/logs"; LOCK_DIR="$RUNTIME_DIR/session.lock"; NETLOG=${VIBECAF_NETLOG:-"$LOG_DIR/network.log"}
+# Private state lives in "Lidwise". Installs from before the rename keep it in
+# the old "Closed-Lid Awake" folder until the installer moves it
+# (state_migrate). Until then every process keeps using the old folder, so the
+# CLI and the guardian always agree on where the live session record is.
+STATE_DIR_CURRENT="$HOME/Library/Application Support/Lidwise"
+STATE_DIR_LEGACY="$HOME/Library/Application Support/Closed-Lid Awake"
+state_paths_resolve() {
+  if [ -n "${VIBECAF_STATE_DIR:-}" ]; then STATE_DIR=$VIBECAF_STATE_DIR
+  elif [ -e "$STATE_DIR_CURRENT" ] || [ -L "$STATE_DIR_CURRENT" ] || [ ! -d "$STATE_DIR_LEGACY" ]; then STATE_DIR=$STATE_DIR_CURRENT
+  else STATE_DIR=$STATE_DIR_LEGACY; fi
+  SESSION_DIR="$STATE_DIR/session"; CONFIG_DIR="$STATE_DIR/config"; GOALS_DIR="$STATE_DIR/goals"; AGENTS_DIR="$STATE_DIR/agents"
+  LOG_DIR="$STATE_DIR/logs"; NETLOG=${VIBECAF_NETLOG:-"$LOG_DIR/network.log"}
+  HISTORY_FILE="$STATE_DIR/history.tsv"; THERMAL_STRIKE_FILE="$SESSION_DIR/thermal-strikes"; STARTFILE="$SESSION_DIR/started_at"
+}
+state_paths_resolve
+LOCK_DIR="$RUNTIME_DIR/session.lock"
 CAF_FLAGS=(-i -m -s)
 DEFAULT_DURATION=${VIBECAF_DEADMAN_SECONDS:-21600}; DEFAULT_BATTERY_FLOOR=${VIBECAF_BATTERY_FLOOR:-20}
 GUARD_EVERY=${VIBECAF_GUARD_EVERY:-60}; THERMAL_STRIKES=${VIBECAF_THERMAL_STRIKES:-3}
@@ -49,7 +62,7 @@ PIDFILE=$(runtime_file caffeinate.pid); NETPIDFILE=$(runtime_file network.pid)
 GUARDPIDFILE=$(runtime_file guard.pid); NETSTATEFILE=$(runtime_file network.state)
 OBSPIDFILE=$(runtime_file observation.pid)
 AGENT_RUNTIME_DIR=$(runtime_file agent-state); AGENTSTATEFILE="$AGENT_RUNTIME_DIR/sessions.tsv"
-THERMAL_STRIKE_FILE="$SESSION_DIR/thermal-strikes"; STARTFILE="$SESSION_DIR/started_at"
+private_dirs_repair
 BATTERY_FLOOR=$(config_battery_floor); REQUIRE_AC=$(config_require_ac)
 DEADMAN_SECONDS=$(config_duration); AGENT_NOTIFY=$(config_notifications)
 NETWORK_RECOVERY=$([ "$(config_recovery)" = 1 ] && echo on || echo off)
@@ -170,45 +183,81 @@ retire_residue_processes() {
   return "$rc"
 }
 
+# The single definition of "this session must stop now" (read-only). $1 is the
+# thermal state read for this check, $2 the serious-pressure strike count
+# including this check. Prints the reason; fails when the session may continue.
+guard_stop_reason() {
+  local thermal=$1 strikes=$2 now deadline blob src pct floor require_ac
+  if modern_session_owned && ! session_valid; then echo "owned session policy is invalid"; return 0; fi
+  now=$(date +%s); deadline=$(read_uint "$SESSION_DIR" deadline 0)
+  if [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; then echo "session deadline passed"; return 0; fi
+  case "$thermal" in critical) echo "thermal pressure: critical"; return 0 ;;
+    serious) [ "$strikes" -lt "$THERMAL_STRIKES" ] || { echo "thermal pressure: serious for $strikes checks"; return 0; } ;; esac
+  blob=$(batt_blob || true); src=$(power_source "$blob"); pct=$(battery_num "$blob")
+  floor=$(read_uint "$SESSION_DIR" battery_floor "$BATTERY_FLOOR")
+  require_ac=$(read_uint "$SESSION_DIR" require_ac 0)
+  if [ "$require_ac" = 1 ] && [ "$src" != AC ]; then echo "AC power is required for this session"; return 0; fi
+  # AC describes the connection, not whether it can sustain the workload.
+  # Enforce the floor even while plugged in or reportedly charging.
+  if valid_battery_percent "$pct" && [ "$pct" -le "$floor" ]; then echo "battery floor: ${pct}% (power source: $src)"; return 0; fi
+  return 1
+}
+guard_next_strikes() { # strikes after this check, given the thermal state
+  case "$1" in serious) echo $(( $(read_uint "$SESSION_DIR" thermal-strikes 0) + 1 )) ;; *) echo 0 ;; esac
+}
 guard_check_once_locked() {
-  local blob src pct now deadline remaining thermal strikes floor require_ac warned
+  local now deadline remaining thermal strikes warned reason
   [ "$(sleep_disabled_state)" = 1 ] && session_active || return 0
-  if modern_session_owned && ! session_valid; then guard_auto_off "owned session policy is invalid"; return; fi
   session_touch || true; now=$(date +%s); deadline=$(read_uint "$SESSION_DIR" deadline 0)
-  if [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; then guard_auto_off "session deadline passed"; return; fi
   remaining=$((deadline - now)); warned=$(read_uint "$SESSION_DIR" warned_deadline 0)
-  if [ "$deadline" -gt 0 ] && [ "$remaining" -le 300 ] && [ "$warned" -ne "$deadline" ]; then
+  if [ "$deadline" -gt 0 ] && [ "$remaining" -gt 0 ] && [ "$remaining" -le 300 ] && [ "$warned" -ne "$deadline" ]; then
     if write_field "$SESSION_DIR" warned_deadline "$deadline"; then
       notify_event "Awake session ending soon" "Session ends in 5 minutes or less. Use 'lidwise extend --by SECONDS' to extend it."
     fi
   fi
-  thermal=$(thermal_state); strikes=$(read_uint "$SESSION_DIR" thermal-strikes 0)
-  case "$thermal" in critical) guard_auto_off "thermal pressure: critical"; return ;;
-    serious) strikes=$((strikes+1)); write_field "$SESSION_DIR" thermal-strikes "$strikes" || true
-      [ "$strikes" -lt "$THERMAL_STRIKES" ] || { guard_auto_off "thermal pressure: serious for $strikes checks"; return; } ;;
-    *) write_field "$SESSION_DIR" thermal-strikes 0 || true ;; esac
-  blob=$(batt_blob || true); src=$(power_source "$blob"); pct=$(battery_num "$blob")
-  floor=$(read_uint "$SESSION_DIR" battery_floor "$BATTERY_FLOOR")
-  require_ac=$(read_uint "$SESSION_DIR" require_ac 0)
-  if [ "$require_ac" = 1 ] && [ "$src" != AC ]; then guard_auto_off "AC power is required for this session"; return; fi
-  # AC describes the connection, not whether it can sustain the workload.
-  # Enforce the floor even while plugged in or reportedly charging.
-  if valid_battery_percent "$pct" && [ "$pct" -le "$floor" ]; then guard_auto_off "battery floor: ${pct}% (power source: $src)"; fi
+  thermal=$(thermal_state); strikes=$(guard_next_strikes "$thermal")
+  write_field "$SESSION_DIR" thermal-strikes "$strikes" || true
+  reason=$(guard_stop_reason "$thermal" "$strikes") || return 0
+  guard_auto_off "$reason"
 }
 guard_check_once() {
-  local rc id
+  local rc id thermal
   if ! lock_acquire; then
-    id=$(current_session_id); [ -z "$id" ] || recovery_mark_failed "$id"
+    # Busy lock is not a failure by itself (another command may be running).
+    # Readiness is withdrawn only when the session should be stopping now
+    # and the guard cannot stop it.
+    id=$(current_session_id)
+    if [ -n "$id" ] && [ "$(sleep_disabled_state)" = 1 ] && session_active; then
+      thermal=$(thermal_state)
+      if guard_stop_reason "$thermal" "$(guard_next_strikes "$thermal")" >/dev/null; then recovery_mark_failed "$id"; fi
+    fi
     return 1
   fi
   VIBECAF_GUARD_LOCK_HELD=1 guard_check_once_locked; rc=$?
   lock_release
   return "$rc"
 }
+# Seconds until the next guard check: the regular interval, shortened so the
+# check lands on the session deadline instead of up to one interval after it.
+guard_delay() {
+  local delay=$GUARD_EVERY deadline now
+  deadline=$(read_uint "$SESSION_DIR" deadline 0); now=$(date +%s)
+  if [ "$deadline" -gt "$now" ] && [ $((deadline - now)) -lt "$delay" ]; then delay=$((deadline - now)); fi
+  [ "$delay" -ge 1 ] 2>/dev/null || delay=1
+  printf '%s' "$delay"
+}
 guard_loop() {
   local id; id=$(current_session_id)
-  while :; do case "$(sleep_disabled_state)" in 0) break ;; 1) guard_check_once || true ;;
-    unknown) netlog "guard: could not read SleepDisabled; recovery remains armed" ;; esac; sleep "$GUARD_EVERY"; done
+  while :; do
+    # A guard belongs to one session. It must not outlive it, or keep taking
+    # the lock under another tool's sleep block.
+    [ -n "$id" ] && [ "$(current_session_id)" = "$id" ] || break
+    case "$(sleep_disabled_state)" in 0) break ;; 1) guard_check_once || true ;;
+    unknown) netlog "guard: could not read SleepDisabled; recovery remains armed" ;; esac
+    # A check can end the session (deadline, safety limit): exit now rather
+    # than after another interval.
+    [ "$(current_session_id)" = "$id" ] || break
+    sleep "$(guard_delay)"; done
   [ "$$" = "$(guard_pid "$id" 2>/dev/null || true)" ] && rm -f "$GUARDPIDFILE"
 }
 guard_auto_off() {
@@ -225,8 +274,21 @@ guard_auto_off() {
   fi; return 1
 }
 guardian_recover() {
-  local reason=$1 id; id=$(current_session_id)
-  if VIBECAF_NONINTERACTIVE=1 VIBECAF_RECOVERY_LOCK=1 VIBECAF_SESSION_END_REASON="$reason" turn_off >/dev/null 2>&1; then notify_event "Awake mode recovered" "$reason"; return; fi
+  local reason=$1 id phase rc; id=$(current_session_id)
+  # Reclaim only a lock whose holder blocks a recovery that is still due.
+  lock_reclaim_for_recovery >/dev/null 2>&1 || true
+  if lock_acquire 2>/dev/null; then
+    phase=$(session_phase)
+    if [ "$phase" = owned-on ]; then
+      # Re-evaluate under the lock: the unlocked observation may be stale.
+      if ! reason=$(recovery_reason); then lock_release; return 0; fi
+      VIBECAF_NONINTERACTIVE=1 turn_off_locked 0 "$reason" >/dev/null 2>&1; rc=$?
+    elif [ "$phase" = unknown ]; then rc=1
+    else lock_release; return 0; fi
+    lock_release
+    if [ "$rc" = 0 ]; then notify_event "Awake mode recovered" "$reason"; return; fi
+  elif ! recovery_lock_allowed; then return 0
+  fi
   recovery_mark_failed "$id"
   if [ "$(read_field "$SESSION_DIR" last-alert)" != "guardian:$reason" ]; then
     write_field "$SESSION_DIR" last-alert "guardian:$reason" || true
@@ -251,27 +313,15 @@ guardian_reconcile_off() {
   lock_release
 }
 guardian_check_once() {
-  local phase state heartbeat now age deadline started id
+  local phase id reason
   phase=$(session_phase)
   case "$phase" in unknown) return 1 ;; off) guardian_reconcile_off; return ;; external-on) return ;; esac
-  state=$(read_field "$SESSION_DIR" state)
-  now=$(date +%s); deadline=$(read_uint "$SESSION_DIR" deadline 0)
   id=$(current_session_id)
-  if modern_session_owned && ! session_valid; then guardian_recover "owned session policy is invalid"; return; fi
-  if [ "$state" = enabling ]; then
-    started=$(read_uint "$SESSION_DIR" started_at 0); age=$((now-started))
-    if { [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; } || [ "$age" -lt 0 ] || [ "$age" -ge "$ACTIVATION_GRACE" ]; then
-      guardian_recover "session activation timed out"
-    elif ! session_enabler_alive; then guardian_recover "session activation did not finish"; fi
-    return
+  if [ -n "$id" ] && [ "$(read_field "$SESSION_DIR" state)" != enabling ] && { ! modern_session_owned || session_valid; }; then
+    write_fields "$SESSION_DIR" guardian_session "$id" guardian_heartbeat "$(date +%s)" || true
   fi
-  if [ -n "$id" ]; then
-    write_field "$SESSION_DIR" guardian_session "$id" || true
-    write_field "$SESSION_DIR" guardian_heartbeat "$now" || true
-  fi
-  heartbeat=$(read_uint "$SESSION_DIR" heartbeat 0); age=$((now-heartbeat))
-  if [ "$heartbeat" -eq 0 ] || [ "$age" -lt 0 ] || [ "$age" -gt "$GUARDIAN_GRACE" ]; then guardian_recover "guard heartbeat lost"; return; fi
-  if [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; then guardian_recover "session deadline passed"; fi
+  reason=$(recovery_reason) || return 0
+  guardian_recover "$reason"
 }
 
 preflight_on() {
@@ -286,6 +336,9 @@ preflight_on() {
   thermal=$(thermal_state)
   case "$thermal" in nominal|fair) ;; serious|critical) echo "Thermal pressure is $thermal; awake mode was not enabled." >&2; return 1 ;;
     *) echo "Thermal monitoring is unavailable; awake mode was not enabled." >&2; return 1 ;; esac
+  if private_dir_untrusted "$CONFIG_DIR" || private_dir_untrusted "$SESSION_DIR"; then
+    echo "Lidwise state directories are not private; the session policy cannot be trusted." >&2; return 1
+  fi
   [ "$(guardian_status)" = running ] || { echo "Crash recovery guardian is not running." >&2; return 1; }
   preflight_restore || { echo "Unattended sleep restoration is not authorized." >&2; return 1; }
 }
@@ -305,16 +358,22 @@ activation_rollback() {
 turn_on_locked() {
   local duration=$1 phase now id blob start_source start_battery; phase=$(session_phase)
   case "$phase" in owned-on)
-      { ! modern_session_owned || session_valid; } || issue_add "Owned session policy is malformed"
-      if session_active; then
+      # Retain only a session that can keep running. A malformed or expired one
+      # is ended here and replaced, instead of being reported as on and then
+      # turned off by the next safety check.
+      local end_reason=superseded deadline
+      deadline=$(read_uint "$SESSION_DIR" deadline 0); now=$(date +%s)
+      if modern_session_owned && ! session_valid; then end_reason="owned session policy is invalid"
+      elif [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; then end_reason="session deadline passed"
+      elif session_active; then
         start_guard || { echo "Owned session exists, but its safety guard could not start." >&2; return 1; }
         start_observation || true; session_id=$(current_session_id)
         [ "$(read_field "$SESSION_DIR" recovery 1)" = 0 ] || start_network_monitor || true
         activation_session=$session_id
-        write_field "$SESSION_DIR" guardian_wake "$session_id" || true
+        write_field "$SESSION_DIR" guardian_wake "$session_id" || true; guardian_ring
         echo "AWAKE MODE: ON"; echo "Existing session retained; its deadline was not extended."; return
       fi
-      turn_off_locked 0 >/dev/null || return 1 ;;
+      turn_off_locked 0 "$end_reason" >/dev/null || return 1 ;;
     external-on) echo "Sleep is blocked by another tool. No lidwise session was created." >&2; return 1 ;;
     unknown) echo "Cannot read SleepDisabled; refusing to change power state." >&2; return 1 ;; esac
   preflight_on || return 1; now=$(date +%s); id="$now.$$.$RANDOM"
@@ -328,7 +387,7 @@ turn_on_locked() {
   fi
   if ! start_caffeinate || ! session_activate || ! start_guard; then activation_rollback "$id"; return 1; fi
   activation_session=$id
-  write_field "$SESSION_DIR" guardian_wake "$id" || true
+  write_field "$SESSION_DIR" guardian_wake "$id" || true; guardian_ring
   start_observation || true
   session_id=$id
   [ "$(read_field "$SESSION_DIR" recovery 1)" = 0 ] || start_network_monitor || true
@@ -377,7 +436,6 @@ turn_off_locked() {
 turn_off() {
   local force=0 rc reason=${VIBECAF_SESSION_END_REASON:-manual}
   [ "${1:-}" = --force ] && force=1
-  if [ "${VIBECAF_RECOVERY_LOCK:-0}" = 1 ]; then lock_reclaim_for_recovery || return 1; fi
   lock_acquire || return 1
   turn_off_locked "$force" "$reason"; rc=$?; lock_release; return "$rc"
 }
@@ -421,8 +479,9 @@ recovery_assess() {
   [ "$verified_session" = "$id" ] || verified=0
   ISSUES_JSON=""; RECOVERY_READY=false; RECOVERY_AUTH_CURRENT=false; RECOVERY_AUTH_AT=$verified
   [ "$thermal" != unknown ] || issue_add "Thermal monitoring is unavailable"
+  ! private_dir_untrusted "$CONFIG_DIR" || issue_add "Settings directory is not private; settings show defaults"
   case "$phase" in owned-on)
-      { ! modern_session_owned || session_valid; } || issue_add "Owned session policy is malformed"
+      { ! modern_session_owned || [ "${STATUS_SESSION_VALID:-$(session_valid && echo 1)}" = 1 ]; } || issue_add "Owned session policy is malformed"
       heartbeat=$(read_epoch "$SESSION_DIR" heartbeat 0); age=$((now-heartbeat))
       [ "$guard" = true ] && [ "$heartbeat" -gt 0 ] && [ "$age" -ge 0 ] && [ "$age" -le $((GUARD_EVERY * 3)) ] || issue_add "Safety guard health is stale"
       guardian_heartbeat=$(read_epoch "$SESSION_DIR" guardian_heartbeat 0); guardian_session=$(read_field "$SESSION_DIR" guardian_session)
@@ -444,9 +503,12 @@ status_json() {
   local duration floor require_ac recovery notifications nt nd agents goals can_extend=false last_session
   phase=$(session_phase); now=$(date +%s); duration=$(config_duration); floor=$(config_battery_floor); require_ac=$(config_require_ac)
   recovery=$(config_recovery); notifications=$(config_notifications)
+  # Policy validity is read once per status (it costs a read of every field).
+  local STATUS_SESSION_VALID=0
   if [ "$phase" = owned-on ]; then
     id=$(current_session_id)
-    if session_valid; then
+    session_valid && STATUS_SESSION_VALID=1
+    if [ "$STATUS_SESSION_VALID" = 1 ]; then
       started=$(read_uint "$SESSION_DIR" started_at 0); deadline=$(read_uint "$SESSION_DIR" deadline 0)
       duration=$(read_uint "$SESSION_DIR" duration_seconds 0); [ "$deadline" -eq 0 ] || duration=$((deadline - started))
       [ "$deadline" -gt 0 ] || deadline=""
@@ -461,7 +523,7 @@ status_json() {
     fi
     if [ -n "$deadline" ]; then
       remaining=$((deadline-now)); [ "$remaining" -ge 0 ] || remaining=0
-      if modern_session_owned && session_valid && [ "$(read_field "$SESSION_DIR" state)" = active ] &&
+      if modern_session_owned && [ "$STATUS_SESSION_VALID" = 1 ] && [ "$(read_field "$SESSION_DIR" state)" = active ] &&
          [ "$deadline" -gt "$now" ] && [ "$deadline" -lt $((started + 21600)) ]; then can_extend=true; fi
     fi
   fi
@@ -556,9 +618,22 @@ doctor() {
   phase=$(session_phase); blob=$(batt_blob || true); thermal=$(thermal_state); guardian=$(guardian_status)
   echo "Lidwise diagnostics"; echo "power phase: $phase"; echo "power source: $(power_source "$blob")"
   echo "battery percent: $(battery_pct "$blob" | tr -d '%' || true)"; echo "thermal: $thermal"
-  echo "runtime directory: $runtime ($RUNTIME_DIR)"; echo "state directory: $state ($STATE_DIR)"; echo "crash guardian: $guardian"
+  echo "runtime directory: $runtime ($RUNTIME_DIR)"; echo "state directory: $state ($STATE_DIR)"
+  if [ "$STATE_DIR" != "$STATE_DIR_LEGACY" ] && [ -e "$STATE_DIR_LEGACY" ] && [ -z "${VIBECAF_STATE_DIR:-}" ]; then
+    echo "old state folder (unused, safe to delete): $STATE_DIR_LEGACY"
+  fi; echo "crash guardian: $guardian"
   echo "safety guard: $(guard_pid >/dev/null 2>&1 && echo running || echo stopped)"
   echo "current restoration authorization: $(recovery_authorization_current && echo available || echo unavailable)"
+  if [ "$phase" = owned-on ]; then
+    # Same assessment as the menu, so a fault shown there is explained here.
+    recovery_assess "$phase" "$thermal" "$(guard_pid >/dev/null 2>&1 && echo true || echo false)" "$guardian"
+    echo "recovery ready: $RECOVERY_READY"
+    [ -z "$ISSUES_JSON" ] || echo "recovery issues: $(printf '%s' "$ISSUES_JSON" | sed 's/^"//; s/"$//; s/","/; /g')"
+    if [ "$(read_field "$SESSION_DIR" recovery_failed_session)" = "$(current_session_id)" ]; then
+      echo "restoration marked failed at: $(read_epoch "$SESSION_DIR" recovery_failed_at 0) ($(read_field "$SESSION_DIR" last-alert none))"
+      echo "to re-verify: turn the session off and on again"
+    fi
+  fi
   echo "network monitoring setting: $NETWORK_RECOVERY"; echo "automatic network recovery: unavailable"
   echo "agent notifications setting: $([ "$(config_notifications)" = 1 ] && echo on || echo off)"
   echo "thermal helper: $THERMAL_STATE_CMD"; echo "pmset: $PMSET"
@@ -571,16 +646,36 @@ netdiag() {
   echo "device:      ${dev:-none}"; echo "radio:       ${radio:-unknown}"; echo "address:     ${ip:-none}"; echo "gateway:     ${gw:-none}"
   echo "state:       $st — $(net_words "$st")"; echo "probe:       $PROBE_URL"
 }
+# One-time move of the pre-rename state folder. Runs only from the installer's
+# maintenance window: the session lock is held, normal sleep is verified, and
+# no session (so no guard or observer) exists. The guardian re-resolves its
+# paths every loop. rename(2) is atomic and refuses a non-empty target, so a
+# folder that appears concurrently is never merged into or overwritten.
+state_migrate() {
+  [ -z "${VIBECAF_STATE_DIR:-}" ] || return 0
+  [ ! -e "$STATE_DIR_CURRENT" ] && [ ! -L "$STATE_DIR_CURRENT" ] || return 0
+  [ -d "$STATE_DIR_LEGACY" ] && [ ! -L "$STATE_DIR_LEGACY" ] && [ "$(path_uid "$STATE_DIR_LEGACY")" = "$USER_ID" ] || return 0
+  [ "$(session_phase)" = off ] && ! session_owned || { echo "State folder not moved: a session is active." >&2; return 1; }
+  /usr/bin/perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$STATE_DIR_LEGACY" "$STATE_DIR_CURRENT" ||
+    { echo "Could not move $STATE_DIR_LEGACY; it remains in use." >&2; return 1; }
+  state_paths_resolve; private_dirs_repair
+  echo "Moved settings and history to $STATE_DIR_CURRENT"
+}
 maintenance() {
-  local rc remove=0 phase
+  local rc remove=0 migrate=0 phase
   if [ "${1:-}" = --remove ]; then remove=1; shift; fi
-  [ "${1:-}" = -- ] && [ "$#" -ge 2 ] || { echo "usage: lidwise __maintenance [--remove] -- COMMAND [ARGS...]" >&2; return 2; }; shift
+  if [ "${1:-}" = --migrate-state ]; then migrate=1; shift; fi
+  [ "${1:-}" = -- ] && [ "$#" -ge 2 ] || { echo "usage: lidwise __maintenance [--remove|--migrate-state] -- COMMAND [ARGS...]" >&2; return 2; }; shift
   lock_acquire || return 1
   phase=$(session_phase)
   if [ "$remove" = 1 ] && [ "$phase" = owned-on ]; then turn_off_locked 0 >/dev/null || { lock_release; return 1; }; phase=$(session_phase); fi
   case "$phase" in off) ;; external-on) [ "$remove" = 1 ] || { echo "Maintenance requires verified normal sleep." >&2; lock_release; return 1; } ;;
     *) echo "Maintenance requires a known safe ownership state." >&2; lock_release; return 1 ;; esac
-  "$@"; rc=$?; lock_release; return "$rc"
+  "$@"; rc=$?
+  # Move state only after a successful install, still under the lock. A failed
+  # move leaves the old folder in use; it never fails the install.
+  if [ "$rc" = 0 ] && [ "$migrate" = 1 ]; then state_migrate || true; fi
+  lock_release; return "$rc"
 }
 usage() { echo "usage: lidwise [on [--for SECONDS]|extend --by SECONDS|off [--force]|toggle|status [--json] [--net]|history [--json]|config get --json|config set ...|hooks ...|verify ...|doctor|netlog|netdiag|agents|goals|goal ...]" >&2; }
 

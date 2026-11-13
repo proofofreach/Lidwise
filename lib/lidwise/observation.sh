@@ -16,21 +16,25 @@ valid_goal_name() {
   case "$1" in *$'\n'*|*$'\t'*) return 1 ;; esac
 }
 
+valid_goal_text() { case "${1:-}" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac; }
+
+# goal_add NAME [--pid PID] [--activity-file PATH] [--stale-after SECONDS]
+# With GOAL_KEEP_EXISTING=1 (restart), options not given keep their stored values.
 goal_add() {
-  local name=${1:-} dir now pid="" activity_file="" stale_after=0
+  local name=${1:-} dir now pid="" activity_file="" stale_after=0 set_pid=0 set_file=0 set_stale=0
   valid_goal_name "$name" || { echo "goal name must be non-empty and contain no tabs or newlines" >&2; return 2; }
   shift || true
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --pid)
         [ "$#" -ge 2 ] || { echo "--pid requires a value" >&2; return 2; }
-        pid=$2; shift 2 ;;
+        pid=$2; set_pid=1; shift 2 ;;
       --activity-file)
         [ "$#" -ge 2 ] || { echo "--activity-file requires a path" >&2; return 2; }
-        activity_file=$2; shift 2 ;;
+        activity_file=$2; set_file=1; shift 2 ;;
       --stale-after)
         [ "$#" -ge 2 ] || { echo "--stale-after requires seconds" >&2; return 2; }
-        stale_after=$2; shift 2 ;;
+        stale_after=$2; set_stale=1; shift 2 ;;
       *) echo "unknown goal option: $1" >&2; return 2 ;;
     esac
   done
@@ -38,16 +42,26 @@ goal_add() {
     "") ;;
     *[!0-9]*|0) echo "pid must be a positive integer" >&2; return 2 ;;
   esac
-  case "$stale_after" in *[!0-9]*) echo "stale-after must be a non-negative integer" >&2; return 2 ;; esac
+  [ -z "$pid" ] || valid_uint "$pid" || { echo "pid must be a positive integer" >&2; return 2; }
+  # Bounded so the stored value always reads back (read_uint falls back to 0,
+  # which would silently disable stall detection).
+  valid_uint "$stale_after" && [ "${#stale_after}" -le 9 ] || { echo "stale-after must be an integer from 0 to 999999999" >&2; return 2; }
+  stale_after=$(uint_normalize "$stale_after")
+  if [ -n "$activity_file" ]; then
+    valid_goal_text "$activity_file" || { echo "activity file path must not contain tabs or newlines" >&2; return 2; }
+    # The observer runs in another working directory: store an absolute path.
+    case "$activity_file" in /*) ;; *) activity_file="$PWD/$activity_file" ;; esac
+    [ -e "$activity_file" ] || { echo "activity file does not exist: $activity_file" >&2; return 2; }
+  fi
   dir=$(goal_dir "$name"); now=$(date +%s)
-  write_field "$dir" name "$name"
-  write_field "$dir" state active
-  write_field "$dir" message ""
-  write_field "$dir" updated_at "$now"
-  write_field "$dir" observed active
-  write_field "$dir" pid "$pid"
-  write_field "$dir" activity_file "$activity_file"
-  write_field "$dir" stale_after "$stale_after"
+  if [ "${GOAL_KEEP_EXISTING:-0}" = 1 ]; then
+    [ "$set_pid" = 1 ] || pid=$(read_field "$dir" pid)
+    [ "$set_file" = 1 ] || activity_file=$(read_field "$dir" activity_file)
+    [ "$set_stale" = 1 ] || stale_after=$(read_uint "$dir" stale_after 0)
+  fi
+  write_fields "$dir" name "$name" state active message "" updated_at "$now" observed active \
+    pid "$pid" activity_file "$activity_file" stale_after "$stale_after" ||
+    { echo "could not save goal: $name" >&2; return 1; }
   echo "goal added: $name"
 }
 
@@ -55,11 +69,10 @@ goal_transition() {  # goal_transition <state> <name> [message]
   local state=$1 name=${2:-} message=${3:-} dir previous title
   dir=$(goal_dir "$name")
   [ -d "$dir" ] || { echo "unknown goal: $name" >&2; return 1; }
+  valid_goal_text "$message" || { echo "goal message must not contain tabs or newlines" >&2; return 2; }
   previous=$(read_field "$dir" observed unknown)
-  write_field "$dir" state "$state"
-  write_field "$dir" observed "$state"
-  write_field "$dir" message "$message"
-  write_field "$dir" updated_at "$(date +%s)"
+  write_fields "$dir" state "$state" observed "$state" message "$message" updated_at "$(date +%s)" ||
+    { echo "could not save goal: $name" >&2; return 1; }
   if [ "$previous" != "$state" ]; then
     case "$state" in
       completed) title="Goal completed" ;;
@@ -85,7 +98,7 @@ goal_restart() {
   local name=${1:-} dir
   dir=$(goal_dir "$name")
   [ -d "$dir" ] || { echo "unknown goal: $name" >&2; return 1; }
-  goal_add "$@" >/dev/null
+  GOAL_KEEP_EXISTING=1 goal_add "$@" >/dev/null || return
   echo "goal restarted: $name"
 }
 
@@ -108,7 +121,9 @@ goal_refresh() {
   if [ "$declared" = "active" ]; then
     pid=$(read_field "$dir" pid)
     stale_after=$(read_uint "$dir" stale_after 0)
-    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+    # kill -0 also fails with EPERM for a live process of another user (for
+    # example under sudo); ps reports liveness regardless of ownership.
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null && ! "${PS:-/bin/ps}" -p "$pid" >/dev/null 2>&1; then
       next=stopped; message="process stopped"
     elif [ "$stale_after" -gt 0 ] 2>/dev/null; then
       last=$(goal_activity_time "$dir"); now=$(date +%s); age=$((now - last))
@@ -273,14 +288,23 @@ agents_refresh() {
   mkdir -p "$AGENTS_DIR"
   chmod 700 "$AGENTS_DIR" 2>/dev/null || true
   owned_dir_valid "$AGENTS_DIR" "$(id -u)" 700 500 || return 1
+  # Prune first, so expired records never hold slots under the record cap.
+  agents_prune
   record_count=$(find "$AGENTS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -n '1,513p' | wc -l | tr -d ' ')
   tmp=$(/usr/bin/mktemp "$AGENTSTATEFILE.XXXXXX") || return 1
   chmod 600 "$tmp"
+  # The bounded runner may terminate this scan; never leak the snapshot.
+  trap 'rm -f "$tmp"; exit 143' TERM
   if ! "$AGENT_SCAN_CMD" > "$tmp"; then
-    rm -f "$tmp" "$AGENTSTATEFILE"
+    rm -f "$tmp" "$AGENTSTATEFILE"; trap - TERM
     return 1
   fi
+  # Publish the snapshot before the per-record bookkeeping, which is slower and
+  # can be cut off by the runner's time bound.
+  mv "$tmp" "$AGENTSTATEFILE" && chmod 600 "$AGENTSTATEFILE" || { rm -f "$tmp"; trap - TERM; return 1; }
+  trap - TERM
 
+  now=$(date +%s)
   while IFS=$'\t' read -r provider session state age; do
     case "$provider" in claude|codex) ;; *) continue ;; esac
     agent_valid_state "$state" || continue
@@ -292,13 +316,21 @@ agents_refresh() {
     agent_valid_session "$session" || continue
     dir=$(agent_record_dir "$provider" "$session")
     if [ ! -d "$dir" ] && [ "$record_count" -ge "$AGENT_RECORD_MAX" ] 2>/dev/null; then continue; fi
-    if [ ! -d "$dir" ]; then record_count=$((record_count + 1)); fi
-    previous=$(read_field "$dir" state unknown)
-    write_field "$dir" provider "$provider"
-    write_field "$dir" session "$session"
-    write_field "$dir" state "$state"
-    write_field "$dir" age "$age"
-    write_field "$dir" updated_at "$(date +%s)"
+    # Records hold only what later scans need: the last state (to detect a
+    # transition) and a last-seen time for pruning, refreshed at most hourly.
+    # The snapshot already carries the age. This keeps a full scan within
+    # the runner's time bound.
+    if [ ! -d "$dir" ]; then
+      record_count=$((record_count + 1)); previous=unknown
+      write_fields "$dir" provider "$provider" session "$session" state "$state" updated_at "$now" || continue
+    else
+      previous=$(read_field "$dir" state unknown)
+      if [ "$previous" != "$state" ]; then
+        write_fields "$dir" state "$state" updated_at "$now" || continue
+      elif [ $((now - $(read_uint "$dir" updated_at 0))) -ge 3600 ]; then
+        write_field "$dir" updated_at "$now" || continue
+      fi
+    fi
 
     [ "$previous" = "unknown" ] && continue
     [ "$previous" = "$state" ] && continue
@@ -313,11 +345,7 @@ agents_refresh() {
       failed:*) title="Agent failed"; body="$display session reported a failure" ;;
     esac
     notify_event "$title" "$body"
-  done < "$tmp"
-
-  mv "$tmp" "$AGENTSTATEFILE"
-  chmod 600 "$AGENTSTATEFILE"
-  agents_prune
+  done < "$AGENTSTATEFILE"
 }
 
 agents_prune() {
@@ -327,7 +355,9 @@ agents_prune() {
   for dir in "$AGENTS_DIR"/*; do
     [ -d "$dir" ] || continue
     updated=$(read_uint "$dir" updated_at 0)
-    [ "$updated" -gt 0 ] || continue
+    # Legacy records have no updated_at; age them by their last change.
+    [ "$updated" -gt 0 ] || updated=$(stat -f %m "$dir" 2>/dev/null || echo 0)
+    agent_valid_age "$updated" && [ "$updated" -gt 0 ] || continue
     age=$((now - updated))
     [ "$age" -gt "$AGENT_RECORD_MAX_AGE" ] || continue
     rm -rf "$dir"
@@ -405,8 +435,11 @@ observation_refresh_activity() {
 }
 observation_loop() {
   local ticks=0 now next_activity=0 next_network=0 delay network_on=0 was_network_on=0
-  local activity_every=${OBSERVATION_EVERY:-60} network_every=${CHECK_EVERY:-20}
+  local activity_every=${OBSERVATION_EVERY:-60} network_every=${CHECK_EVERY:-20} owner=""
+  # A session's observer ends with that session even if its retirement failed.
+  if command -v current_session_id >/dev/null 2>&1; then owner=$(current_session_id); fi
   while :; do
+    if [ -n "$owner" ] && [ "$(current_session_id)" != "$owner" ]; then return 0; fi
     now=$(observation_now)
     if command -v config_notifications >/dev/null 2>&1; then AGENT_NOTIFY=$(config_notifications); fi
     network_on=0

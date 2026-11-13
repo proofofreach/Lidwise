@@ -170,4 +170,18 @@ chmod 600 "$AGENTSTATEFILE"
 counts=$(agents_json)
 [ "$counts" = '{"claude":{"working":1,"waiting":1,"quiet":0,"finished":1,"failed":1},"codex":{"working":0,"waiting":0,"quiet":1,"finished":0,"failed":0}}' ]
 
+# Hooks installed from another copy of the app (moved or translocated bundle)
+# are replaced on install and removed on remove, never stranded or duplicated.
+mkdir -p "$WORK/copy-a/bin"; cp "$SCAN" "$WORK/copy-a/bin/lidwise-agent-scan"
+printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/keep-me"}]}]}}' > "$VIBECAF_CLAUDE_SETTINGS"
+VIBECAF_AGENT_MARKER_CMD="$ROOT/.build/helpers/lidwise-agent-scan-core" "$WORK/copy-a/bin/lidwise-agent-scan" --hooks install claude >/dev/null
+grep -q "copy-a/bin/lidwise-agent-scan" "$VIBECAF_CLAUDE_SETTINGS"
+"$SCAN" --hooks install claude >/dev/null
+[ "$(grep -c -- '--hooks hook claude' "$VIBECAF_CLAUDE_SETTINGS")" = 4 ]
+! grep -q "copy-a/bin/lidwise-agent-scan" "$VIBECAF_CLAUDE_SETTINGS"
+VIBECAF_AGENT_MARKER_CMD="$ROOT/.build/helpers/lidwise-agent-scan-core" "$WORK/copy-a/bin/lidwise-agent-scan" --hooks install claude >/dev/null
+"$SCAN" --hooks remove all >/dev/null
+! grep -q -- '--hooks hook claude' "$VIBECAF_CLAUDE_SETTINGS"
+grep -q '"/keep-me"' "$VIBECAF_CLAUDE_SETTINGS"
+
 echo 'explicit lifecycle events and reversible Claude hooks: ok'

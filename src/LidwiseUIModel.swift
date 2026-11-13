@@ -327,12 +327,25 @@ enum StatusParser {
         }
         guard schema == 1 else { throw StatusParseError.unsupportedSchema(schema) }
         do {
-            var state = try JSONDecoder().decode(State.self, from: data)
+            var state = try decodeState(data, dictionary: dictionary)
             state.pending = nil
             state.commandError = nil
             return state
         } catch {
             throw StatusParseError.invalidPayload(error.localizedDescription)
+        }
+    }
+
+    // last_session is diagnostic history. A malformed record must never hide
+    // the live power phase, so it is dropped and the rest is decoded strictly.
+    private static func decodeState(_ data: Data, dictionary: [String: Any]) throws -> State {
+        do { return try JSONDecoder().decode(State.self, from: data) }
+        catch {
+            guard let last = dictionary["last_session"], !(last is NSNull) else { throw error }
+            var stripped = dictionary
+            stripped["last_session"] = NSNull()
+            let retry = try JSONSerialization.data(withJSONObject: stripped)
+            return try JSONDecoder().decode(State.self, from: retry)
         }
     }
 }

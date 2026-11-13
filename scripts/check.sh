@@ -6,6 +6,14 @@ WORK=$(mktemp -d "$ROOT/.build/check.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 for script in "$ROOT"/bin/lidwise* "$ROOT"/lib/lidwise/*.sh "$ROOT"/scripts/*.sh "$ROOT"/tests/*.sh; do /bin/bash -n "$script"; done
 "$ROOT/scripts/build-helpers.sh"
+# Safety net: no test may reach the real machine's power state or Lidwise
+# state. Tests that need these provide their own mocks and override these
+# defaults; a test that forgets fails instead of acting on this Mac.
+NET="$WORK/no-real-power"; mkdir -p "$NET"
+printf '#!/bin/sh\necho "test reached a real power command: $0 $*" >&2\nexit 97\n' > "$NET/refuse"; chmod 755 "$NET/refuse"
+export VIBECAF_PMSET="$NET/refuse" VIBECAF_SUDO="$NET/refuse" VIBECAF_OSASCRIPT="$NET/refuse"
+export VIBECAF_LAUNCHCTL="$NET/refuse" VIBECAF_CAFFEINATE="$NET/refuse"
+export VIBECAF_STATE_DIR="$NET/state" VIBECAF_RUNTIME_DIR="$NET/run" VIBECAF_NONINTERACTIVE=1
 for test_script in "$ROOT"/tests/*.sh; do
   [ "$(basename "$test_script")" = release-verifier-cases.sh ] && continue
   "$test_script"

@@ -32,6 +32,25 @@ secure_dir() {
   chmod 700 "$dir"
 }
 
+# Every reader treats a non-private directory as empty, so a mode change (a
+# restore, sync tool, or chmod -R) would silently reset the safety policy to
+# defaults and hide an owned session. Restore 0700 on existing directories the
+# user owns; one stat covers all of them. A directory that cannot be repaired
+# (foreign owner or symlink) stays untrusted, and callers fail closed.
+private_dirs_repair() {
+  local dir line owner mode
+  for dir in "$STATE_DIR" "$SESSION_DIR" "$CONFIG_DIR"; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    line=$(stat -f '%u %Lp' "$dir" 2>/dev/null || stat -c '%u %a' "$dir" 2>/dev/null) || continue
+    owner=${line%% *}; mode=${line##* }
+    [ "$owner" = "$USER_ID" ] && [ "$mode" != 700 ] && chmod 700 "$dir" 2>/dev/null
+  done
+  return 0
+}
+# A directory that exists but is not private cannot be read, so its contents
+# (policy or ownership) are unknown rather than absent.
+private_dir_untrusted() { { [ -e "$1" ] || [ -L "$1" ]; } && ! private_dir_valid "$1"; }
+
 runtime_init() {
   secure_dir "$RUNTIME_DIR" || { echo "Unsafe runtime directory: $RUNTIME_DIR" >&2; return 1; }
 }
@@ -64,22 +83,48 @@ valid_epoch() { local value; value=$(uint_normalize "${1:-}") || return 1; [ "${
 valid_bool() { case "${1:-}" in 0|1) return 0 ;; *) return 1 ;; esac; }
 valid_session_id() { case "${1:-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac; }
 
+field_write_valid() {
+  case "$2" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  if [ "$1" = "${SESSION_DIR:-}" ]; then session_field_valid "$2" || return 1; fi
+  case "$3" in *$'\n'*|*$'\r'*) return 1 ;; esac
+}
+# Caller has validated the field and secured the directory. mktemp creates the
+# file 0600 regardless of umask, and the rename is atomic.
+field_write_unchecked() {
+  local tmp
+  tmp=$(mktemp "$1/.$2.XXXXXX") || return 1
+  printf '%s\n' "$3" > "$tmp" && mv -f "$tmp" "$1/$2" || { rm -f "$tmp"; return 1; }
+}
 write_field() {
-  local dir=$1 field=$2 value=$3 tmp
-  case "$field" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  if [ "$dir" = "${SESSION_DIR:-}" ]; then session_field_valid "$field" || return 1; fi
-  case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  field_write_valid "$1" "$2" "$3" || return 1
+  secure_dir "$1" || return 1
+  field_write_unchecked "$1" "$2" "$3"
+}
+# write_fields DIR FIELD VALUE [FIELD VALUE...]: one directory check, then each
+# field in order. Validates every pair before writing any, and stops at the
+# first failed write.
+write_fields() {
+  local dir=$1 rest
+  shift
+  [ $(( $# % 2 )) -eq 0 ] || return 1
+  rest=("$@")
+  while [ "$#" -gt 0 ]; do field_write_valid "$dir" "$1" "$2" || return 1; shift 2; done
   secure_dir "$dir" || return 1
-  tmp=$(mktemp "$dir/.$field.XXXXXX") || return 1
-  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  printf '%s\n' "$value" > "$tmp" && mv -f "$tmp" "$dir/$field" || { rm -f "$tmp"; return 1; }
+  set -- "${rest[@]}"
+  while [ "$#" -gt 0 ]; do field_write_unchecked "$dir" "$1" "$2" || return 1; shift 2; done
 }
 
 read_field() {
   local file="$1/$2" value owner
   private_dir_valid "$1" || { printf '%s' "${3:-}"; return; }
   [ -f "$file" ] && [ ! -L "$file" ] || { printf '%s' "${3:-}"; return; }
-  value=$(sed -n '1p' "$file" 2>/dev/null) || value="${3:-}"
+  # First line, read with a builtin (no process per field). A final line
+  # without a newline is still returned.
+  # An empty file reads as empty; only an unreadable one uses the fallback.
+  value=""
+  if ! { IFS= read -r value || [ -n "$value" ]; } < "$file" 2>/dev/null; then
+    if [ -r "$file" ]; then value=""; else value="${3:-}"; fi
+  fi
   printf '%s' "$value"
 }
 
@@ -270,20 +315,30 @@ lock_release() {
   trap - EXIT HUP INT TERM
 }
 
-recovery_lock_allowed() {
+# The single definition of "this owned session needs crash recovery". The
+# guardian observes it without the lock and must re-evaluate it under the lock
+# before acting, so an activation or turn-off that finishes between the two
+# reads is never mistaken for a crash. Prints the reason; fails when healthy.
+recovery_reason() {
   local now state started deadline heartbeat age
   session_owned || return 1
-  if modern_session_owned && ! session_valid; then return 0; fi
+  if modern_session_owned && ! session_valid; then echo "owned session policy is invalid"; return 0; fi
   now=$(date +%s); state=$(read_field "$SESSION_DIR" state); deadline=$(read_uint "$SESSION_DIR" deadline 0)
-  if [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; then return 0; fi
   if [ "$state" = enabling ]; then
     started=$(read_uint "$SESSION_DIR" started_at 0); age=$((now-started))
-    [ "$started" -eq 0 ] || [ "$age" -lt 0 ] || [ "$age" -ge "$ACTIVATION_GRACE" ]
-  else
-    heartbeat=$(read_uint "$SESSION_DIR" heartbeat 0); age=$((now-heartbeat))
-    [ "$heartbeat" -eq 0 ] || [ "$age" -lt 0 ] || [ "$age" -gt "$GUARDIAN_GRACE" ]
+    if { [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; } || [ "$started" -eq 0 ] ||
+       [ "$age" -lt 0 ] || [ "$age" -ge "$ACTIVATION_GRACE" ]; then
+      echo "session activation timed out"; return 0
+    fi
+    session_enabler_alive && return 1
+    echo "session activation did not finish"; return 0
   fi
+  heartbeat=$(read_uint "$SESSION_DIR" heartbeat 0); age=$((now-heartbeat))
+  if [ "$heartbeat" -eq 0 ] || [ "$age" -lt 0 ] || [ "$age" -gt "$GUARDIAN_GRACE" ]; then echo "guard heartbeat lost"; return 0; fi
+  if [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; then echo "session deadline passed"; return 0; fi
+  return 1
 }
+recovery_lock_allowed() { recovery_reason >/dev/null; }
 
 process_identity_same() {
   local pid=$1 expected_start=$2 actual_start
@@ -405,21 +460,18 @@ session_claim() {
   local id=$1 now=$2 duration=$3 start deadline=0 battery_start=${4:--} power_start=${5:--}
   [ "$duration" -eq 0 ] || deadline=$((now + duration))
   state_init || return 1; start=$(process_start_identity $$)
-  write_field "$SESSION_DIR" id "$id" && write_field "$SESSION_DIR" state enabling &&
-    write_field "$SESSION_DIR" started_at "$now" && write_field "$SESSION_DIR" deadline "$deadline" &&
-    write_field "$SESSION_DIR" duration_seconds "$duration" && write_field "$SESSION_DIR" battery_floor "$BATTERY_FLOOR" &&
-    write_field "$SESSION_DIR" require_ac "$REQUIRE_AC" && write_field "$SESSION_DIR" policy_version 2 &&
-    write_field "$SESSION_DIR" battery_start "$battery_start" && write_field "$SESSION_DIR" power_start "$power_start" &&
-    write_field "$SESSION_DIR" recovery "$(config_recovery)" && write_field "$SESSION_DIR" notifications "$(config_notifications)" &&
-    write_field "$SESSION_DIR" heartbeat "$now" && write_field "$SESSION_DIR" thermal-strikes 0 &&
-    write_field "$SESSION_DIR" enabling_pid "$$" && write_field "$SESSION_DIR" enabling_start "$start"
+  # Ownership (id + enabling state) and the enabler identity come first so a
+  # crash after any write leaves a record the guardian can classify.
+  write_fields "$SESSION_DIR" id "$id" state enabling started_at "$now" enabling_pid "$$" enabling_start "$start" \
+    deadline "$deadline" duration_seconds "$duration" battery_floor "$BATTERY_FLOOR" \
+    require_ac "$REQUIRE_AC" policy_version 2 battery_start "$battery_start" power_start "$power_start" \
+    recovery "$(config_recovery)" notifications "$(config_notifications)" heartbeat "$now" thermal-strikes 0
 }
 
 session_activate() {
   local id
   id=$(current_session_id); valid_session_id "$id" || return 1
-  write_field "$SESSION_DIR" state active && write_field "$SESSION_DIR" recovery_verified_session "$id" &&
-    write_field "$SESSION_DIR" recovery_verified_at "$(date +%s)" &&
+  write_fields "$SESSION_DIR" state active recovery_verified_session "$id" recovery_verified_at "$(date +%s)" &&
     rm -f "$SESSION_DIR/enabling_pid" "$SESSION_DIR/enabling_start" "$SESSION_DIR/last-alert"
 }
 
